@@ -1,2 +1,3 @@
 dist/
 baml_client/
+.env

@@ -1,5 +1,6 @@
 import type { SessionState, ServerMessage } from "@compass-ai/types"
 
+// temporarily in memory
 const sessions = new Map<string, SessionState>()
 
 export function createSession(sessionId: string, send: (msg: ServerMessage) => void): SessionState {

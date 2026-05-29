@@ -8,7 +8,7 @@ function ResearchAgent(question: string) -> ResearchOutput {
   prompt #"
     You are the research agent for a financial trading platform.
     Answer the following question with concise, factual information.
-    Focus on recent data. No filler.
+    Focus on recent data. No filler and only output data from credible sources
 
     Question: {{ question }}
 

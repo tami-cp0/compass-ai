@@ -11,3 +11,11 @@ client<llm> Claude {
     api_key env.ANTHROPIC_API_KEY
   }
 }
+
+client<llm> GPT4o {
+  provider openai
+  options {
+    model "gpt-4o"
+    api_key env.OPENAI_API_KEY
+  }
+}

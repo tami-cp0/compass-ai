@@ -12,7 +12,8 @@ export type ExtensionMessage = {
     type: "dom_snapshot";
     sessionId: string;
     taskType: DomTaskType;
-    payload: string;
+    screenshot: string;
+    elementMap: string;
 } | {
     type: "action_result";
     sessionId: string;
@@ -48,8 +49,8 @@ export type ServerMessage = {
     sessionId: string;
     actionId: string;
     taskId: string;
-    kind: ActionKind;
-    target: ActionTarget;
+    intent: WebIntent;
+    isCritical: boolean;
 } | {
     type: "dom_snapshot_request";
     sessionId: string;
@@ -97,12 +98,21 @@ export type ServerMessage = {
     description: string;
 };
 export type DomTaskType = "click" | "form" | "read" | "structure";
-export type ActionKind = "click" | "type" | "scroll";
-export interface ActionTarget {
-    selector?: string;
-    coords?: {
-        x: number;
-        y: number;
-    };
-}
+export type WebIntent = {
+    action: "click";
+    element_id: number;
+} | {
+    action: "type";
+    element_id: number;
+    value: string;
+} | {
+    action: "scroll";
+    element_id: number | null;
+    direction: "up" | "down";
+    amount: number;
+} | {
+    action: "highlight";
+    element_id: number;
+    text_snippet: string;
+};
 //# sourceMappingURL=messages.d.ts.map
