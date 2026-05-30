@@ -1,13 +1,12 @@
 import type { ExtensionMessage, ServerMessage } from "@compass-ai/types"
 import cssText from "data-text:~/styles/globals.css"
 import { MicIcon, MicOff } from "lucide-react"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
-import { WebSpeechProvider } from "~/speech/web-speech-provider"
+import { PcmCapture } from "~/audio/pcm-capture"
+import { PcmPlayer } from "~/audio/pcm-player"
 
-type StripSessionId<T> = T extends { sessionId: string }
-  ? Omit<T, "sessionId">
-  : T
+type StripSessionId<T> = T extends { sessionId: string } ? Omit<T, "sessionId"> : T
 type OutboundExtensionMessage = StripSessionId<ExtensionMessage>
 
 export const getStyle = () => {
@@ -16,75 +15,50 @@ export const getStyle = () => {
   return style
 }
 
-const provider = new WebSpeechProvider()
-let audioCtx: AudioContext | null = null
-
-function getAudioCtx(): AudioContext {
-  if (!audioCtx) audioCtx = new AudioContext()
-  return audioCtx
-}
-
-async function playAudio(base64Data: string): Promise<void> {
-  const ctx = getAudioCtx()
-  const bytes = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0))
-  const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0))
-  const source = ctx.createBufferSource()
-  source.buffer = audioBuffer
-  source.connect(ctx.destination)
-  source.start()
-}
+const player = new PcmPlayer(24000)
 
 const Pill = () => {
-  const [listening, setListening] = useState(false)
+  const [listening, setListening]   = useState(false)
+  const captureRef = useRef<PcmCapture | null>(null)
 
-  useEffect(() => {
-    provider.onTranscript = (text: string, isFinal: boolean) => {
-      const msg: OutboundExtensionMessage = {
-        type: "transcript_input",
-        text,
-        isFinal
-      }
-      chrome.runtime.sendMessage(msg)
-    }
-    return () => {
-      provider.onTranscript = null
-    }
-  }, [])
-
+  // Incoming audio from Gemini via background → play it
   useEffect(() => {
     const onMessage = (msg: ServerMessage) => {
-      if (msg.type !== "speech_audio") return
-      const ctx = getAudioCtx()
-      if (ctx.state === "suspended") {
-        ctx
-          .resume()
-          .then(() => playAudio(msg.data))
-          .catch(console.error)
-      } else {
-        playAudio(msg.data).catch(console.error)
-      }
+      if (msg.type !== "audio_chunk") return
+      player.resume()
+      player.play(msg.data)
     }
     chrome.runtime.onMessage.addListener(onMessage)
-    return () => {
-      chrome.runtime.onMessage.removeListener(onMessage)
-    }
+    return () => chrome.runtime.onMessage.removeListener(onMessage)
+  }, [])
+
+  const startListening = useCallback(async () => {
+    const capture = new PcmCapture((base64Pcm: string) => {
+      const msg: OutboundExtensionMessage = {
+        type:     "audio_chunk",
+        data:     base64Pcm,
+        mimeType: "audio/pcm",
+      }
+      chrome.runtime.sendMessage(msg)
+    })
+    await capture.start()
+    captureRef.current = capture
+    setListening(true)
+  }, [])
+
+  const stopListening = useCallback(() => {
+    captureRef.current?.stop()
+    captureRef.current = null
+    setListening(false)
   }, [])
 
   const toggle = useCallback(() => {
     if (listening) {
-      provider.stop()
-      setListening(false)
+      stopListening()
     } else {
-      if (!WebSpeechProvider.isSupported()) {
-        console.warn("[compass] Web Speech API not supported in this browser")
-        return
-      }
-      // Initialize AudioContext inside user gesture so it starts in running state
-      getAudioCtx()
-      provider.start()
-      setListening(true)
+      startListening().catch(console.error)
     }
-  }, [listening])
+  }, [listening, startListening, stopListening])
 
   return (
     <div className="fixed top-6 flex justify-center w-full">
