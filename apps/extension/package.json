@@ -34,7 +34,8 @@
       "http://*/*"
     ],
     "permissions": [
-      "tabs"
+      "tabs",
+      "microphone"
     ]
   }
 }
