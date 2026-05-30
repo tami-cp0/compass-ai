@@ -12,13 +12,13 @@ Three agents:
 
 | Agent | Lives | Purpose |
 |---|---|---|
-| Voice Agent | Backend (Gemini Live) | Persistent audio session. Conversational brain. Dispatches tools without going silent. |
-| Web Agent | Backend (BAML + GPT-4o) | DOM automation. Called as a background task by the Voice Agent. |
-| Research Agent | Backend (BAML) | Web search + summarization. Called as a background task by the Voice Agent. |
+| Voice Agent | Gemini Live (cloud) | Persistent audio session. Conversational brain. Dispatches tools without going silent. |
+| Web Agent | Backend (BAML + GPT-4o) | DOM automation planning. Content scripts execute actions in the browser. |
+| Research Agent | Backend (BAML + Gemini 1.5 Flash) | Web search + summarization. Runs as a background task. |
 
 **Core architectural principle — Front Desk & Back Office:**
 
-The Voice Agent (Gemini Live) is the front desk: it never goes silent waiting for work to finish. When it dispatches a tool, Node immediately returns a placeholder acknowledgement so Gemini keeps talking. The actual work (web automation, research) runs as a background job managed by the Node `TaskManager`. When a job completes, its result is injected into the live Gemini session as a new content part. Gemini naturally weaves it into the conversation.
+The Voice Agent (Gemini Live) is the front desk: it never goes silent waiting for work to finish. When it dispatches a tool, Node **immediately** returns a placeholder acknowledgement so Gemini keeps talking. The actual work (web automation, research) runs as a background job managed by the Node `TaskManager`. When a job completes, the result is injected into the live Gemini session as a content part. Gemini naturally weaves it into the conversation.
 
 ---
 
@@ -26,29 +26,32 @@ The Voice Agent (Gemini Live) is the front desk: it never goes silent waiting fo
 
 ```
 Extension (Pill)
-  │  raw PCM audio chunks (16kHz mono)
+  │  raw PCM audio (16kHz mono, base64)
   ▼
-background.ts ──WebSocket──► Node API Server
-                               │
-                               ├─ GeminiLiveSession
-                               │    • streams audio in/out via Gemini Live API
-                               │    • declares tools: dispatch_research,
-                               │      dispatch_automation, cancel_task
-                               │    • receives injected content parts from TaskManager
-                               │
-                               └─ TaskManager
-                                    • research slots: [task?, task?]  (max 2 concurrent)
-                                    • automation slot: task?           (max 1 concurrent)
-                                    • AbortController per task
-                                    • injects results into GeminiLiveSession on completion
-                                    • guaranteed cancel — discards results from cancelled tasks
+background.ts ──uws WebSocket──► Node API Server
+                                   │
+                                   ├─ GeminiLiveSession (1 per user session)
+                                   │    • pipes PCM audio in → Gemini Live WebSocket
+                                   │    • pipes PCM audio out → extension via uws
+                                   │    • declares tools: dispatch_research,
+                                   │      dispatch_automation, cancel_task
+                                   │    • receives tool_call events → delegates to TaskManager
+                                   │    • receives injected content parts from TaskManager
+                                   │    • emits turn transcripts for Redis history
+                                   │
+                                   └─ TaskManager (1 per user session)
+                                        • research slots: [task?, task?]  (max 2 concurrent)
+                                        • automation slot: task?           (max 1 concurrent)
+                                        • AbortController per task
+                                        • injects results into GeminiLiveSession on completion
+                                        • guaranteed cancel — discards results from cancelled tasks
 ```
 
-**Gateway role:** The uws WebSocket server routes raw bytes between the extension and the Node backend. It does not understand messages. It does not make decisions.
+**Gateway (uws):** Routes raw bytes between the extension and the Node backend. Does not understand messages. Does not make decisions.
 
-**GeminiLiveSession role:** One persistent session per connected user. Owns the Gemini Live WebSocket. Streams PCM audio in, receives PCM audio out (played by the extension). Declares the three tool functions. Forwards tool call events to the TaskManager.
+**GeminiLiveSession:** One instance per connected user. Owns two WebSocket connections — one to the extension (via uws), one to Gemini Live. Acts as the audio bridge between them. Also handles the Gemini tool call / tool response cycle and delegates background work to TaskManager.
 
-**TaskManager role:** Owns all background job state. Tracks running tasks, enforces slot limits, manages cancellation, and injects results back into the GeminiLiveSession.
+**TaskManager:** Owns all background job state. Enforces slot limits, runs BAML calls as async jobs, manages cancellation, and injects results back into the GeminiLiveSession when jobs complete.
 
 ---
 
@@ -56,17 +59,22 @@ background.ts ──WebSocket──► Node API Server
 
 | Concern | Solution |
 |---|---|
-| WebSocket server | µWebSockets.js (uws) — high-throughput, handles extension ↔ Node connection |
-| Voice session | Gemini Live API (`gemini-2.0-flash-live`) — persistent bidirectional audio WebSocket |
+| Extension ↔ Node transport | µWebSockets.js (uws) — handles the extension WebSocket connection |
+| Voice session | Gemini Live API (`gemini-2.0-flash-live`) — persistent bidirectional audio + tool calling |
 | Session state | In-memory `Map<sessionId, SessionState>` — lives with the connection |
 | Conversation history | Redis — keyed by sessionId, persists across reconnects |
-| LLM (web agent) | GPT-4o (vision required for screenshots), called via BAML |
-| LLM (research agent) | Gemini 1.5 Flash (fast, cheap for text summarization), called via BAML |
+| Web agent planner | GPT-4o via BAML (vision required for DOM screenshots) |
+| Research agent | Gemini 1.5 Flash via BAML (fast, cheap for text summarization) |
 | Agent definitions | BAML — web agent and research agent defined as BAML functions |
-| Audio transport | PCM 16kHz mono — extension streams mic audio, receives Gemini audio output |
+| Audio format | PCM 16kHz mono — extension captures mic, sends to Node, Node pipes to Gemini Live |
 | Monorepo | pnpm workspaces + Turborepo |
 
-**STT and TTS are fully removed.** Gemini Live handles both natively inside the audio stream. There is no `SpeechProvider`, no `TTSProvider`, no `WebSpeechProvider`, no `OpenAITTSProvider`.
+**What is fully removed vs. the previous architecture:**
+- `SpeechProvider` interface and `WebSpeechProvider` — Gemini Live handles STT natively
+- `TTSProvider` interface and `OpenAITTSProvider` — Gemini Live handles TTS natively
+- `handleTranscript()` — the per-turn orchestrator function is gone; Gemini Live owns the conversation loop
+- BAML `voice_agent.baml` — replaced by Gemini Live session with declared tools
+- `transcript_input` message type — replaced by `audio_chunk` streaming
 
 ---
 
@@ -76,7 +84,7 @@ background.ts ──WebSocket──► Node API Server
 compass-ai/
 ├── apps/
 │   ├── extension/        — Plasmo browser extension
-│   └── api/              — uws gateway + Gemini Live session + TaskManager + background agents
+│   └── api/              — uws gateway + GeminiLiveSession + TaskManager + BAML agents
 ├── packages/
 │   └── types/            — Shared message schema (consumed by both apps)
 ├── turbo.json
@@ -93,26 +101,24 @@ All messages are JSON with a `type` discriminant. Defined in `packages/types/src
 ### Extension → Gateway → Node
 
 ```ts
-// Audio: extension streams raw mic audio as base64-encoded PCM chunks
-{ type: "audio_chunk";         sessionId: string; data: string; mimeType: "audio/pcm" }
+// Mic audio: raw PCM streamed in real time
+{ type: "audio_chunk";        sessionId: string; data: string; mimeType: "audio/pcm" }
 
-// Web automation results
-{ type: "dom_snapshot";        sessionId: string; taskId: string; taskType: DomTaskType; screenshot: string; elementMap: string }
-{ type: "action_result";       sessionId: string; actionId: string; taskId: string; success: boolean; error?: string }
-{ type: "automation_status";   sessionId: string; taskId: string; state: "running" | "paused" | "cancelled" }
-{ type: "user_action_result";  sessionId: string; actionId: string; taskId: string; confirmed: boolean }
+// Web automation: extension reports results back to Node
+{ type: "dom_snapshot";       sessionId: string; taskId: string; taskType: DomTaskType; screenshot: string; elementMap: string }
+{ type: "action_result";      sessionId: string; actionId: string; taskId: string; success: boolean; error?: string }
+{ type: "user_action_result"; sessionId: string; actionId: string; taskId: string; confirmed: boolean }
 ```
 
 ### Node → Gateway → Extension
 
 ```ts
-// Audio: Gemini Live audio output streamed back as PCM chunks
+// Gemini audio output: PCM streamed back in real time
 { type: "audio_chunk";          sessionId: string; data: string; mimeType: "audio/pcm" }
 
-// Web automation instructions
-{ type: "action";               sessionId: string; actionId: string; taskId: string; intent: WebIntent; isCritical: boolean }
+// Web automation instructions sent to the extension
 { type: "dom_snapshot_request"; sessionId: string; taskId: string; taskType: DomTaskType }
-{ type: "automation_start";     sessionId: string; taskId: string; description: string }
+{ type: "action";               sessionId: string; actionId: string; taskId: string; intent: WebIntent; isCritical: boolean }
 { type: "automation_end";       sessionId: string; taskId: string; reason: "complete" | "cancelled" | "error"; error?: string }
 { type: "user_action_required"; sessionId: string; actionId: string; taskId: string; description: string }
 
@@ -121,7 +127,6 @@ All messages are JSON with a `type` discriminant. Defined in `packages/types/src
 ```
 
 ```ts
-// WebIntent union
 type WebIntent =
   | { action: "click";     element_id: number }
   | { action: "type";      element_id: number; value: string }
@@ -131,18 +136,20 @@ type WebIntent =
 type DomTaskType = "click" | "form" | "read" | "structure"
 ```
 
+Note: there are no `transcript_input`, `speech_audio`, `automation_status`, `automation_start`, `automation_pause`, `automation_resume`, or `research_chunk` messages in this architecture. Those belonged to the old STT/LLM/TTS turn-based loop and are removed.
+
 ---
 
 ## 6. Task Model
 
-Each background job is a `Task`:
+Each background job managed by TaskManager is a `Task`:
 
 ```ts
 type TaskType   = "research" | "automation"
 type TaskStatus = "running" | "completed" | "failed" | "cancelled"
 
 interface Task {
-  taskId:          string            // uuid
+  taskId:          string
   type:            TaskType
   name:            string            // short human label e.g. "DANGCEM Q3 earnings"
   description:     string            // full question or automation instruction
@@ -152,93 +159,99 @@ interface Task {
 }
 ```
 
-### Slot Rules (enforced by TaskManager before dispatch)
+### Slot Rules (enforced before dispatch)
 
 | Scenario | Behaviour |
 |---|---|
-| New research, 0–1 slots used | Dispatch immediately |
-| New research, 2 slots used | Return conflict payload — names of both running tasks. Gemini delivers: *"You already asked me to research X and Y — wait for those, or scratch both and file this?"* |
-| New automation, slot empty | Dispatch immediately |
-| New automation, slot occupied | Return conflict payload — name of running task. Gemini delivers: *"You already told me to X — should I stop that and do what you just said?"* |
-| Research + automation simultaneously | Allowed — independent slots |
+| New research, 0–1 slots used | Dispatch immediately, return `{ taskId }` to Gemini |
+| New research, 2 slots used | Return `{ conflict: true, type: "research", running: [name1, name2] }` — Gemini delivers the conflict in voice |
+| New automation, slot empty | Dispatch immediately, return `{ taskId }` to Gemini |
+| New automation, slot occupied | Return `{ conflict: true, type: "automation", running: name }` — Gemini delivers the conflict in voice |
+| Research + automation simultaneously | Allowed — fully independent slots |
 
-Conflict payloads are structured data returned to Gemini as tool responses. Gemini generates the voice phrasing naturally — no hardcoded strings on the server.
+Conflict payloads are structured data. Gemini generates the voice phrasing — no hardcoded strings on the server. The user's reply (cancel the old one / keep it) is handled by Gemini calling `cancel_task` or doing nothing.
 
 ### Cancellation (Guaranteed)
 
 `cancel_task(taskId)`:
 1. Sets `task.status = "cancelled"`.
-2. Calls `task.abortController.abort()` — interrupts the in-flight BAML call if possible.
-3. Adds `taskId` to a `cancelledTasks: Set<string>` on the session.
+2. Calls `task.abortController.abort()` — interrupts the BAML call mid-flight if possible.
+3. Adds `taskId` to `session.cancelledTasks: Set<string>`.
 
-Before any result is injected into the Gemini session, TaskManager checks `cancelledTasks`. Results from cancelled tasks are silently discarded — even if the job completed milliseconds before the cancel arrived.
+Before any result injection, TaskManager checks `cancelledTasks`. Results from cancelled tasks are silently discarded — even if the job completed milliseconds before the cancel arrived.
 
 ---
 
 ## 7. GeminiLiveSession
 
-One instance per user session. Wraps the Gemini Live WebSocket.
+One instance per user session. Owns the Gemini Live WebSocket connection and acts as the audio + tool bridge.
+
+### Audio Bridge
+
+```
+Extension mic audio
+  → uws receives audio_chunk
+  → GeminiLiveSession.sendAudio(pcmChunk)
+  → Gemini Live input stream
+
+Gemini Live output stream
+  → GeminiLiveSession receives audio delta
+  → session.send({ type: "audio_chunk", data: pcmChunk })
+  → uws delivers to extension
+  → pill.tsx plays via Web Audio API
+```
+
+Audio flows continuously in both directions. There is no request/response cycle.
 
 ### Tool Declarations
 
-Three tools are declared in the session config at connection time:
+Registered in the Gemini session config at connection time:
 
 ```ts
-dispatch_research(name: string, description: string): TaskConflict | { taskId: string }
-// name: short label e.g. "DANGCEM Q3 earnings"
-// description: full research question
-// returns taskId on success, or conflict data if both slots are full
-
-dispatch_automation(name: string, description: string): TaskConflict | { taskId: string }
-// name: short label e.g. "Fill order form"
-// description: full automation instruction for the web agent
-// returns taskId on success, or conflict data if slot is occupied
-
+dispatch_research(name: string, description: string): { taskId: string } | { conflict: true, type: "research", running: string[] }
+dispatch_automation(name: string, description: string): { taskId: string } | { conflict: true, type: "automation", running: string }
 cancel_task(taskId: string): { cancelled: boolean }
 ```
 
-### Tool Call Handling
+### Tool Call Cycle
 
-When Gemini calls a tool:
-1. Node calls the corresponding TaskManager method.
-2. **Immediately** returns the result to Gemini (success + taskId, or conflict data).
-3. Gemini never waits — it keeps talking while the background job runs.
-
-### Result Injection
-
-When a background job completes or fails, TaskManager calls `session.injectContent(part)`. This sends a `client_content` message into the Gemini Live WebSocket session. Gemini receives it as new context and naturally incorporates it in the ongoing conversation.
-
-**Research result injection:**
-```ts
-{
-  role: "user",
-  parts: [{
-    text: `Research task "${task.name}" complete:\n${result}`
-  }]
-}
+```
+Gemini emits tool_call event
+  → GeminiLiveSession receives it
+  → calls TaskManager.dispatch*(name, description) or TaskManager.cancel(taskId)
+  → TaskManager returns result synchronously (slot check only, no async work yet)
+  → GeminiLiveSession sends tool_response back to Gemini immediately
+  → Gemini keeps talking
+  → TaskManager runs the actual job in the background
 ```
 
-**Automation complete injection:**
+### Result and Progress Injection
+
+TaskManager calls `session.injectContent(part)` to push context into the live session.
+
+**Injection format:**
 ```ts
-{
-  role: "user",
-  parts: [{
-    text: `Automation task "${task.name}" completed successfully.`
-  }]
-}
+// Research complete
+{ role: "user", parts: [{ text: `Research "${task.name}" complete:\n${result}` }] }
+
+// Research failed
+{ role: "user", parts: [{ text: `Research "${task.name}" failed: ${error}` }] }
+
+// Automation complete
+{ role: "user", parts: [{ text: `Automation "${task.name}" completed successfully.` }] }
+
+// Automation failed
+{ role: "user", parts: [{ text: `Automation "${task.name}" failed: ${error}` }] }
+
+// Automation progress (silent context — does NOT trigger Gemini to speak)
+{ role: "user", parts: [{ text: `[automation context] ${description}` }] }
+// These are prefixed with [automation context] so the system prompt instructs Gemini
+// to absorb them silently and only reference them if asked or when the task ends.
 ```
 
-**Automation failed injection:**
-```ts
-{
-  role: "user",
-  parts: [{
-    text: `Automation task "${task.name}" failed: ${error}`
-  }]
-}
-```
+### Transcript Events for Redis
 
-Automation progress events (intermediate steps like "navigated to order book", "click failed, retrying") are injected as `role: "user"` content parts with no trailing model turn request — this updates Gemini's context without triggering a response generation. Gemini only speaks about automation when the final complete/failed injection arrives.
+Gemini Live emits `turn_complete` events with the full text of what Gemini said. Node captures these and writes them to Redis as `{ role: "model", content: text }` turns. User speech transcripts come from Gemini Live's `input_transcription` events and are written as `{ role: "user", content: text }` turns.
 
 ---
 
@@ -246,30 +259,32 @@ Automation progress events (intermediate steps like "navigated to order book", "
 
 ```ts
 interface SessionState {
-  sessionId:    string
-  send:         (msg: ServerMessage) => void  // delivers to extension via gateway
+  sessionId:      string
+  send:           (msg: ServerMessage) => void   // delivers to extension via uws
 
   // Task slots
-  researchSlots:    [Task | null, Task | null]
-  automationSlot:   Task | null
-  cancelledTasks:   Set<string>
+  researchSlots:  [Task | null, Task | null]
+  automationSlot: Task | null
+  cancelledTasks: Set<string>
 
-  // Gemini Live session handle
-  geminiSession:    GeminiLiveSession
+  // Gemini Live session
+  geminiSession:  GeminiLiveSession
 }
 ```
+
+`session.send(msg)` is the only way to put a message on the wire to the extension. The uws socket handle lives in the gateway; the rest of the system never touches it directly.
 
 ---
 
 ## 9. Conversation History (Redis)
 
-The Gemini Live session maintains its own rolling context internally. Redis stores a persistent conversation summary that survives reconnects and is injected into the Gemini session system prompt on reconnect.
+Gemini Live maintains its own in-session context. Redis stores a persistent summary that survives disconnects and is injected into the system prompt on reconnect.
 
 ```ts
 // Key: `conversation:{sessionId}`
 interface ConversationHistory {
-  summary:      string    // rolling compressed summary of all older turns
-  recentTurns:  Turn[]    // last 6 turns kept verbatim
+  summary:     string   // rolling compressed summary of all older turns
+  recentTurns: Turn[]   // last 6 turns kept verbatim
 }
 
 interface Turn {
@@ -279,41 +294,72 @@ interface Turn {
 }
 ```
 
-### Rolling Summary Strategy
+### When Redis is Written
 
-Gemini Live does not have discrete turns in the same sense as a REST call. The Node backend writes to Redis on two triggers: (1) when a tool result is injected — marking the end of a meaningful exchange, and (2) on session close — capturing the final state. If `recentTurns.length > 6`, the oldest turn is compressed into `summary` as one concise fact line. The summary is an ordered list — what the user asked, what was done, what the result was.
+Node writes to Redis on two triggers:
+1. **Tool result injected** — a meaningful exchange just completed (research delivered, automation finished). Captures the turns that led to and followed the task.
+2. **Session close** — captures whatever the final conversation state was.
 
-Example:
+There are no discrete HTTP-style turns to write back. Node listens to Gemini Live's `turn_complete` and `input_transcription` events to build the turn log.
+
+### Rolling Summary
+
+If `recentTurns.length > 6`, the oldest turn is shifted out and appended to `summary` as one concise fact line. The summary is an ordered list — what the user asked, what happened, what the result was.
+
 ```
 1. User asked about DANGCEM stock price. Researched and reported ₦18.50.
 2. User asked to place a buy order for 500 units. Web agent filled the form. User confirmed. Order submitted.
 3. User asked about portfolio balance. Read the page. Reported ₦2.3M available.
 ```
 
-On reconnect, the summary + recent turns are injected into the Gemini session system prompt so the conversation resumes with full context.
+On reconnect, the summary + recent turns are prepended to the Gemini session system prompt.
 
 ---
 
-## 10. Web Agent (Extension-Side)
+## 10. Web Agent — Backend Planner (BAML + GPT-4o)
 
-The web agent is content scripts inside the extension — it touches the DOM. It receives instructions from the Node backend (via the gateway) and reports results back.
+When TaskManager dispatches an automation task, it runs the web agent planning loop on the backend:
 
-### DOM Snapshot Strategy
+```
+TaskManager dispatches automation job
+  → sends dom_snapshot_request to extension via session.send
+  → extension content script captures DOM + screenshot
+  → extension sends dom_snapshot back to Node
+  → TaskManager passes { task, elementMap, screenshot } to WebAgent BAML function (GPT-4o)
+  → WebAgent returns ordered list of WebIntent actions
+  → TaskManager sends each action to extension via session.send({ type: "action", ... })
+  → extension executes and returns action_result
+  → for each result:
+      success → log progress event, inject silent context into Gemini
+      failure → retry or mark task failed, inject failure into Gemini
+      critical action → send user_action_required, wait for user_action_result
+  → task complete → inject completion into Gemini, update TaskManager slot
+```
 
-Every `dom_snapshot` contains two parts:
+The web agent LLM never sees Gemini Live. It only receives a DOM snapshot and outputs intents. It does not know about the voice session.
 
-1. **Screenshot** — base64 PNG of the visible viewport.
-2. **Compressed element map** — unique `element_id` assigned to every interactable element, with position data kept in extension memory.
+---
 
+## 11. Web Agent — Extension Content Scripts
+
+The extension-side web agent executes the intents produced by the backend planner. It is purely mechanical — receive intent, execute browser API call, report result.
+
+### DOM Snapshot
+
+When the extension receives `dom_snapshot_request`, it:
+1. Queries all interactable elements: `button`, `input`, `select`, `textarea`, `a[href]`, `[role=button]`, `[role=link]`, `[role=menuitem]`, `[role=option]`, and scrollable containers.
+2. Assigns each a unique integer `element_id` (reset per snapshot).
+3. Calls `getBoundingClientRect()` on each, stores `element_id → { element, coords }` in content script memory.
+4. Builds compressed text representation:
 ```
 [Button id=42, text="Confirm Trade", role="button"]
 [Input id=17, placeholder="Quantity", type="number"]
 [Container id=8, text="GTCO 45.20 +1.2%", scrollable=true]
 ```
+5. Captures screenshot via `chrome.tabs.captureVisibleTab()`.
+6. Sends `dom_snapshot` to background.ts → gateway.
 
-The web agent LLM (GPT-4o via BAML) receives the map and screenshot, outputs structured `WebIntent` actions referencing `element_id` values only — never coordinates.
-
-### Action Execution
+### Intent Execution
 
 **click**
 ```ts
@@ -345,52 +391,37 @@ window.getSelection()!.removeAllRanges()
 window.getSelection()!.addRange(range)
 ```
 
-**Critical action guard:** Any action where `isCritical: true` (buy, sell, withdraw, confirm) is blocked by the extension. It returns `action_result` with `success: false, error: "requires_confirmation"`. The server emits `user_action_required` and waits for `user_action_result` before retrying.
-
-### Automation Progress → Context Injection
-
-As the web automation task runs, the Node backend receives `action_result` messages and builds a time-series log:
-
-```ts
-interface AutomationProgressEvent {
-  timestamp: number
-  description: string   // e.g. "Navigated to order book page"
-                        //      "Failed to click confirm button — retrying"
-                        //      "Filled quantity field with 500"
-}
-```
-
-Each progress event is injected into the Gemini session as a silent context part (no speech triggered). When the task ends (complete or failed), a final injection is sent that Gemini can speak about.
+**Critical action guard:** If `isCritical: true` (buy, sell, withdraw, confirm), the content script does NOT execute. It immediately returns `action_result` with `success: false, error: "requires_confirmation"`. The Node backend emits `user_action_required` to the extension. The extension shows a confirmation UI. The user's response comes back as `user_action_result`. Node retries the action if confirmed, or marks it cancelled if denied.
 
 ---
 
-## 11. BAML — Agent Definitions
+## 12. BAML — Agent Definitions
 
-Web agent and research agent are BAML functions. BAML generates a type-safe TypeScript client.
+Only the backend agents (web + research) use BAML. The voice agent is Gemini Live — not BAML.
 
 ```
 apps/api/
 └── baml_src/
-    ├── clients.baml         — model config (GPT-4o for web agent, Gemini 1.5 Flash for research)
-    ├── web_agent.baml       — WebAgent: input = task + element map + screenshot → structured WebIntent list
-    └── research_agent.baml  — ResearchAgent: input = question → structured summary
+    ├── clients.baml         — model config: GPT4o client (web agent), GeminiFlash client (research)
+    ├── web_agent.baml       — WebAgent(task, elementMap, screenshot) → WebIntent[]
+    └── research_agent.baml  — ResearchAgent(question) → structured summary string
 ```
 
-Swapping models is a one-line change in `clients.baml`. The TaskManager never calls the Gemini Live API — it calls BAML.
+The voice_agent.baml from the previous architecture is deleted.
 
 ---
 
-## 12. Extension — Audio Streaming
+## 13. Extension — Audio Streaming (pill.tsx)
 
-The extension streams raw PCM audio from the microphone to the gateway in `audio_chunk` messages. The gateway forwards chunks to the Node backend, which pipes them into the Gemini Live session's input stream.
+The mic button in `pill.tsx` starts and stops a `MediaRecorder` or `AudioWorklet` capturing raw PCM at 16kHz mono. Each audio chunk is base64-encoded and sent as an `audio_chunk` message to background.ts, which forwards it over the WebSocket to Node.
 
-Gemini Live output audio (PCM) is streamed back the same way: Node → gateway → extension. The extension plays each chunk via the Web Audio API as it arrives — no buffering wait for a complete response.
+Gemini Live audio output arrives at Node as PCM deltas. Node base64-encodes each delta and sends it to the extension as `audio_chunk`. `pill.tsx` decodes and plays each chunk via the Web Audio API as it arrives — no buffering, no waiting for a complete utterance.
 
-The mic button in `pill.tsx` starts and stops the audio stream. There is no `SpeechProvider` interface, no transcript messages, no Web Speech API.
+There is no `SpeechProvider`, no Web Speech API, no transcript messages, no `playAudio(base64Mp3)` function. All of that is replaced by the PCM audio stream.
 
 ---
 
-## 13. Development Phases
+## 14. Development Phases
 
 ### Phase 1 — API Foundation ✓
 - uws gateway, TypeScript, tsconfig
@@ -402,56 +433,53 @@ The mic button in `pill.tsx` starts and stops the audio stream. There is no `Spe
 - `background.ts` WebSocket client: connects on install, reconnects on drop
 - `chrome.runtime.sendMessage` relay between `background.ts` and content scripts
 
-### Phase 3 — Voice Input (STT via Web Speech API) ✓
-- `WebSpeechProvider` in extension, mic button in `pill.tsx`
-- `transcript_input` flows end-to-end (now superseded by Phase 5)
+### Phase 3 — Voice Input via Web Speech API ✓ (superseded)
+### Phase 4 — Voice Agent via BAML + GPT-4o + OpenAI TTS ✓ (superseded)
 
-### Phase 4 — Voice Agent Conversation (BAML + GPT-4o + OpenAI TTS) ✓
-- Voice turn loop working end-to-end (now superseded by Phase 5)
-
-### Phase 5 — Gemini Live Voice Session (replaces Phases 3 + 4)
-- Remove `WebSpeechProvider`, `SpeechProvider` interface, `TTSProvider` interface, `OpenAITTSProvider`, `handleTranscript`, BAML voice_agent
-- `GeminiLiveSession` class: wraps Gemini Live WebSocket, streams PCM audio in/out
-- Extension: replace `transcript_input` flow with PCM audio streaming via `audio_chunk`
-- `pill.tsx`: replace mic button → Web Speech API flow with mic → PCM capture → `audio_chunk`
-- Gemini session config: declare `dispatch_research`, `dispatch_automation`, `cancel_task` tools
-- End-to-end voice conversation working through Gemini Live
+### Phase 5 — Gemini Live Voice Session
+**Removes:** `WebSpeechProvider`, `SpeechProvider`, `TTSProvider`, `OpenAITTSProvider`, `handleTranscript`, `voice_agent.baml`, `transcript_input` and `speech_audio` message types.
+**Adds:**
+- `GeminiLiveSession` class: opens Gemini Live WebSocket, declares tools, pipes audio in/out
+- Extension `pill.tsx`: replace Web Speech API with PCM `AudioWorklet` capture → `audio_chunk` messages
+- Extension `pill.tsx`: replace `playAudio(base64Mp3)` with streaming PCM playback via Web Audio API
+- `session_init` handshake unchanged — session lifecycle stays the same
+- Gemini system prompt: includes persona, silent-context instruction for `[automation context]` prefixed parts
+- End-to-end voice conversation working through Gemini Live with no other agents wired yet
 
 ### Phase 6 — TaskManager + Research Agent
-- `TaskManager`: slot enforcement, `AbortController` per task, `cancelledTasks` set, result injection
+- `TaskManager` class: slot enforcement, `AbortController` per task, `cancelledTasks` set, `injectContent()` method
 - `ResearchAgent` BAML function (Gemini 1.5 Flash)
-- `dispatch_research` tool wired: fires background job, immediate acknowledgement, result injected on completion
-- Conflict handling for research slots
+- `dispatch_research` tool wired end-to-end: Gemini calls it → immediate ack → background BAML job → inject result
+- Conflict handling: two concurrent research tasks triggers conflict payload
 - Guaranteed cancel for research tasks
 
 ### Phase 7 — Web Agent: DOM Reading
-- `dom-watcher.ts` content script: handles `dom_snapshot_request`, captures DOM + screenshot
-- `dom_snapshot` flows: extension → gateway → Node → web agent (BAML + GPT-4o)
+- `dom-watcher.ts` content script: handles `dom_snapshot_request`, captures element map + screenshot
+- `dom_snapshot` flows: extension → gateway → Node → `WebAgent` BAML call (GPT-4o)
+- `dispatch_automation` tool partially wired: read-only tasks only (no action execution yet)
 
 ### Phase 8 — Web Agent: Action Execution
-- `action-executor.ts` content script: receives `action`, executes DOM automation
-- `action_result` relay: content script → background → gateway → Node
-- Full automation lifecycle: start / end / progress / cancel
-- Automation progress events injected as silent context into Gemini session
-- `dispatch_automation` tool wired: fires background job, immediate acknowledgement
-- Critical action guard + `user_action_required` flow
+- `action-executor.ts` content script: receives `action` messages, executes DOM intents, returns `action_result`
+- Full automation planning loop: snapshot → BAML → intents → execute → progress inject → complete inject
+- Critical action guard + `user_action_required` / `user_action_result` flow
 - Conflict handling for automation slot
 - Guaranteed cancel for automation tasks
+- Automation progress injected as silent `[automation context]` parts into Gemini session
 
 ### Phase 9 — Proactive Context Awareness
-- Gemini session receives page context (DOM snapshots) proactively when user navigates
-- Gemini can comment on page state without being asked
+- Extension sends DOM snapshots proactively on navigation events
+- Gemini session receives page context and can comment on it without being asked
 
 ### Phase 10 — Landing Page
 - `apps/web` — built last, after the product works
 
 ---
 
-## 14. Out of Scope (Future)
+## 15. Out of Scope (Future)
 
 - User accounts + authentication
 - Multiple Gemini voice / language options
 - Research Agent as a separate process / service
 - Deployment / containerization
-- Whisper STT (superseded by Gemini Live native STT)
-- OpenAI TTS (superseded by Gemini Live native TTS)
+- Whisper STT (Gemini Live handles STT natively)
+- OpenAI TTS (Gemini Live handles TTS natively)
