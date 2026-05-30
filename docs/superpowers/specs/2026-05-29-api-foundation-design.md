@@ -1,39 +1,54 @@
 # Compass AI — System Design
-**Date:** 2026-05-29
-**Scope:** Full system architecture + Phase 1 API Foundation
+**Date:** 2026-05-29 (revised 2026-05-30)
+**Scope:** Full system architecture — Gemini Live + Front Desk & Back Office pattern
 
 ---
 
 ## 1. Overview
 
-Compass AI is a browser extension backed by a Node.js WebSocket server. The user speaks to Compass; Compass understands, acts on the browser, researches the web, and speaks back — all in real time, all streaming, never blocking.
+Compass AI is a browser extension backed by a Node.js WebSocket server. The user speaks to Compass; Compass understands, acts on the browser, researches the web, and speaks back — all in real time, never blocking the voice interface.
 
 Three agents:
 
 | Agent | Lives | Purpose |
 |---|---|---|
-| Voice Agent | Backend | STT → LLM orchestrator → TTS. The brain. Decides everything. |
-| Web Agent | Extension | DOM capture + action execution on the live page. Pluggable. |
-| Research Agent | Backend | Web search + real-time summarization. Pluggable. Added last. |
+| Voice Agent | Backend (Gemini Live) | Persistent audio session. Conversational brain. Dispatches tools without going silent. |
+| Web Agent | Backend (BAML + GPT-4o) | DOM automation. Called as a background task by the Voice Agent. |
+| Research Agent | Backend (BAML) | Web search + summarization. Called as a background task by the Voice Agent. |
+
+**Core architectural principle — Front Desk & Back Office:**
+
+The Voice Agent (Gemini Live) is the front desk: it never goes silent waiting for work to finish. When it dispatches a tool, Node immediately returns a placeholder acknowledgement so Gemini keeps talking. The actual work (web automation, research) runs as a background job managed by the Node `TaskManager`. When a job completes, its result is injected into the live Gemini session as a new content part. Gemini naturally weaves it into the conversation.
 
 ---
 
-## 2. How Messages Actually Flow
-
-Understanding who sends what is critical. There are two backend components with distinct roles:
-
-**Gateway** — the uws WebSocket server. Its only job is to accept connections, maintain sessions in memory, and route raw bytes between the extension and the voice agent. It does not make decisions. It does not understand messages.
-
-**Voice Agent** — the LLM orchestrator. It is the only component that decides what to send to the extension. When the voice agent wants to click something, it tells the gateway to deliver an `action` message to the extension. When the extension sends a `dom_snapshot`, the gateway delivers it to the voice agent.
+## 2. How Messages Flow
 
 ```
-Extension ──[WebSocket]──► Gateway ──► Voice Agent
-Extension ◄─[WebSocket]─── Gateway ◄── Voice Agent
+Extension (Pill)
+  │  raw PCM audio chunks (16kHz mono)
+  ▼
+background.ts ──WebSocket──► Node API Server
+                               │
+                               ├─ GeminiLiveSession
+                               │    • streams audio in/out via Gemini Live API
+                               │    • declares tools: dispatch_research,
+                               │      dispatch_automation, cancel_task
+                               │    • receives injected content parts from TaskManager
+                               │
+                               └─ TaskManager
+                                    • research slots: [task?, task?]  (max 2 concurrent)
+                                    • automation slot: task?           (max 1 concurrent)
+                                    • AbortController per task
+                                    • injects results into GeminiLiveSession on completion
+                                    • guaranteed cancel — discards results from cancelled tasks
 ```
 
-So "backend → extension" always means "voice agent decided → gateway delivered." These two phrases mean the same thing throughout this document.
+**Gateway role:** The uws WebSocket server routes raw bytes between the extension and the Node backend. It does not understand messages. It does not make decisions.
 
-The web agent lives entirely inside the extension. It is not a server — it is the DOM-touching code running in the browser. The voice agent instructs it via the gateway.
+**GeminiLiveSession role:** One persistent session per connected user. Owns the Gemini Live WebSocket. Streams PCM audio in, receives PCM audio out (played by the extension). Declares the three tool functions. Forwards tool call events to the TaskManager.
+
+**TaskManager role:** Owns all background job state. Tracks running tasks, enforces slot limits, manages cancellation, and injects results back into the GeminiLiveSession.
 
 ---
 
@@ -41,15 +56,17 @@ The web agent lives entirely inside the extension. It is not a server — it is 
 
 | Concern | Solution |
 |---|---|
-| WebSocket server | µWebSockets.js (uws) — chosen for high-throughput multi-user load |
+| WebSocket server | µWebSockets.js (uws) — high-throughput, handles extension ↔ Node connection |
+| Voice session | Gemini Live API (`gemini-2.0-flash-live`) — persistent bidirectional audio WebSocket |
 | Session state | In-memory `Map<sessionId, SessionState>` — lives with the connection |
 | Conversation history | Redis — keyed by sessionId, persists across reconnects |
-| LLM (voice + research agents) | Claude, called via BAML |
 | LLM (web agent) | GPT-4o (vision required for screenshots), called via BAML |
-| Agent definitions | BAML — all three agents defined as BAML functions, client is a one-line swap per agent |
-| TTS | OpenAI TTS now, swappable behind `TTSProvider` interface |
-| STT | Web Speech API now → Whisper later, behind `SpeechProvider` interface |
+| LLM (research agent) | Gemini 1.5 Flash (fast, cheap for text summarization), called via BAML |
+| Agent definitions | BAML — web agent and research agent defined as BAML functions |
+| Audio transport | PCM 16kHz mono — extension streams mic audio, receives Gemini audio output |
 | Monorepo | pnpm workspaces + Turborepo |
+
+**STT and TTS are fully removed.** Gemini Live handles both natively inside the audio stream. There is no `SpeechProvider`, no `TTSProvider`, no `WebSpeechProvider`, no `OpenAITTSProvider`.
 
 ---
 
@@ -59,7 +76,7 @@ The web agent lives entirely inside the extension. It is not a server — it is 
 compass-ai/
 ├── apps/
 │   ├── extension/        — Plasmo browser extension
-│   └── api/              — uws gateway + voice agent + research agent
+│   └── api/              — uws gateway + Gemini Live session + TaskManager + background agents
 ├── packages/
 │   └── types/            — Shared message schema (consumed by both apps)
 ├── turbo.json
@@ -73,310 +90,233 @@ compass-ai/
 
 All messages are JSON with a `type` discriminant. Defined in `packages/types/src/messages.ts`.
 
-### Extension → Gateway → Voice Agent
+### Extension → Gateway → Node
 
 ```ts
-// Phase 3 (Web Speech API): extension sends transcribed text
-{ type: "transcript_input";    sessionId: string; text: string; isFinal: boolean }
-// Future (Whisper): extension streams raw audio instead
-{ type: "audio_chunk";         sessionId: string; data: string; mimeType: string }
-{ type: "dom_snapshot";        sessionId: string; taskType: DomTaskType; screenshot: string; elementMap: string }
-// screenshot: base64 PNG of visible viewport
-// elementMap: flattened text map of interactable elements with element_ids
+// Audio: extension streams raw mic audio as base64-encoded PCM chunks
+{ type: "audio_chunk";         sessionId: string; data: string; mimeType: "audio/pcm" }
+
+// Web automation results
+{ type: "dom_snapshot";        sessionId: string; taskId: string; taskType: DomTaskType; screenshot: string; elementMap: string }
 { type: "action_result";       sessionId: string; actionId: string; taskId: string; success: boolean; error?: string }
-{ type: "automation_status";   sessionId: string; taskId: string; state: "running"|"paused"|"cancelled" }
+{ type: "automation_status";   sessionId: string; taskId: string; state: "running" | "paused" | "cancelled" }
+{ type: "user_action_result";  sessionId: string; actionId: string; taskId: string; confirmed: boolean }
 ```
 
-### Voice Agent → Gateway → Extension
+### Node → Gateway → Extension
 
 ```ts
-{ type: "transcript";           sessionId: string; text: string; isFinal: boolean }
-{ type: "speech_audio";         sessionId: string; data: string; mimeType: "audio/mp3"; isFinal: boolean }
+// Audio: Gemini Live audio output streamed back as PCM chunks
+{ type: "audio_chunk";          sessionId: string; data: string; mimeType: "audio/pcm" }
+
+// Web automation instructions
 { type: "action";               sessionId: string; actionId: string; taskId: string; intent: WebIntent; isCritical: boolean }
-// WebIntent is one of:
-// { action: "click",     element_id: number }
-// { action: "type",      element_id: number; value: string }
-// { action: "scroll",    element_id: number | null; direction: "up"|"down"; amount: number }
-// { action: "highlight", element_id: number; text_snippet: string }
 { type: "dom_snapshot_request"; sessionId: string; taskId: string; taskType: DomTaskType }
 { type: "automation_start";     sessionId: string; taskId: string; description: string }
-{ type: "automation_pause";     sessionId: string; taskId: string }
-{ type: "automation_resume";    sessionId: string; taskId: string }
-{ type: "automation_cancel";    sessionId: string; taskId: string }
-{ type: "automation_end";       sessionId: string; taskId: string; reason: "complete"|"cancelled"|"error"; error?: string }
-{ type: "automation_progress";     sessionId: string; taskId: string; description: string }
-{ type: "research_chunk";          sessionId: string; taskId: string; text: string; isFinal: boolean }
-{ type: "user_action_required";    sessionId: string; actionId: string; taskId: string; description: string }
-// e.g. description: "Confirm purchase of 500 units of DANGCEM at ₦18.50"
-```
+{ type: "automation_end";       sessionId: string; taskId: string; reason: "complete" | "cancelled" | "error"; error?: string }
+{ type: "user_action_required"; sessionId: string; actionId: string; taskId: string; description: string }
 
-### Extension → Gateway → Voice Agent (additions)
+// Session handshake
+{ type: "session_init";         sessionId: string }
+```
 
 ```ts
-{ type: "user_action_result";   sessionId: string; actionId: string; taskId: string; confirmed: boolean }
-// Extension sends this after user taps confirm or cancel on the user_action_required prompt
-```
+// WebIntent union
+type WebIntent =
+  | { action: "click";     element_id: number }
+  | { action: "type";      element_id: number; value: string }
+  | { action: "scroll";    element_id: number | null; direction: "up" | "down"; amount: number }
+  | { action: "highlight"; element_id: number; text_snippet: string }
 
-where `DomTaskType = "click" | "form" | "read" | "structure"`
+type DomTaskType = "click" | "form" | "read" | "structure"
+```
 
 ---
 
-## 6. Session State (In-Memory, Gateway)
+## 6. Task Model
 
-The gateway owns session state. The voice agent reads and mutates it via the session store API.
+Each background job is a `Task`:
 
 ```ts
-interface SessionState {
-  sessionId: string
-  send: (msg: ServerMessage) => void   // delivers a message to the extension via the gateway
+type TaskType   = "research" | "automation"
+type TaskStatus = "running" | "completed" | "failed" | "cancelled"
 
-  // Automation state
-  automationState: "idle" | "running" | "paused" | "cancelled"
-  currentTaskId: string | null
-  currentAutomationDescription: string | null  // what the web agent is currently doing, e.g. "Looking for the order book to show you the bid/ask spread"
-
-  // Research state
-  isResearching: boolean
-  researchDescription: string | null  // what is being researched, e.g. "DANGCEM Q3 earnings". null when not researching.
-
-  // Task queue
-  activeTasks: Map<string, { type: "automation" | "research"; description: string }>
-  taskQueue: Array<{
-    taskId: string
-    type: "automation" | "research"
-    description: string
-    queuedReason: string   // e.g. "User asked to check DANGCEM while MTNN research was running"
-    queuedAt: number
-  }>
+interface Task {
+  taskId:          string            // uuid
+  type:            TaskType
+  name:            string            // short human label e.g. "DANGCEM Q3 earnings"
+  description:     string            // full question or automation instruction
+  status:          TaskStatus
+  abortController: AbortController
+  startedAt:       number
 }
 ```
 
-`session.send(msg)` is the only way the voice agent puts a message on the wire to the extension. The gateway owns the WebSocket handle; the voice agent never touches it directly.
+### Slot Rules (enforced by TaskManager before dispatch)
 
-The voice agent answers "what are you doing?" by reading `currentAutomationDescription` and `researchDescription` directly from session state — it does not need an LLM call to answer this.
+| Scenario | Behaviour |
+|---|---|
+| New research, 0–1 slots used | Dispatch immediately |
+| New research, 2 slots used | Return conflict payload — names of both running tasks. Gemini delivers: *"You already asked me to research X and Y — wait for those, or scratch both and file this?"* |
+| New automation, slot empty | Dispatch immediately |
+| New automation, slot occupied | Return conflict payload — name of running task. Gemini delivers: *"You already told me to X — should I stop that and do what you just said?"* |
+| Research + automation simultaneously | Allowed — independent slots |
+
+Conflict payloads are structured data returned to Gemini as tool responses. Gemini generates the voice phrasing naturally — no hardcoded strings on the server.
+
+### Cancellation (Guaranteed)
+
+`cancel_task(taskId)`:
+1. Sets `task.status = "cancelled"`.
+2. Calls `task.abortController.abort()` — interrupts the in-flight BAML call if possible.
+3. Adds `taskId` to a `cancelledTasks: Set<string>` on the session.
+
+Before any result is injected into the Gemini session, TaskManager checks `cancelledTasks`. Results from cancelled tasks are silently discarded — even if the job completed milliseconds before the cancel arrived.
 
 ---
 
-## 7. Conversation History (Redis)
+## 7. GeminiLiveSession
+
+One instance per user session. Wraps the Gemini Live WebSocket.
+
+### Tool Declarations
+
+Three tools are declared in the session config at connection time:
+
+```ts
+dispatch_research(name: string, description: string): TaskConflict | { taskId: string }
+// name: short label e.g. "DANGCEM Q3 earnings"
+// description: full research question
+// returns taskId on success, or conflict data if both slots are full
+
+dispatch_automation(name: string, description: string): TaskConflict | { taskId: string }
+// name: short label e.g. "Fill order form"
+// description: full automation instruction for the web agent
+// returns taskId on success, or conflict data if slot is occupied
+
+cancel_task(taskId: string): { cancelled: boolean }
+```
+
+### Tool Call Handling
+
+When Gemini calls a tool:
+1. Node calls the corresponding TaskManager method.
+2. **Immediately** returns the result to Gemini (success + taskId, or conflict data).
+3. Gemini never waits — it keeps talking while the background job runs.
+
+### Result Injection
+
+When a background job completes or fails, TaskManager calls `session.injectContent(part)`. This sends a `client_content` message into the Gemini Live WebSocket session. Gemini receives it as new context and naturally incorporates it in the ongoing conversation.
+
+**Research result injection:**
+```ts
+{
+  role: "user",
+  parts: [{
+    text: `Research task "${task.name}" complete:\n${result}`
+  }]
+}
+```
+
+**Automation complete injection:**
+```ts
+{
+  role: "user",
+  parts: [{
+    text: `Automation task "${task.name}" completed successfully.`
+  }]
+}
+```
+
+**Automation failed injection:**
+```ts
+{
+  role: "user",
+  parts: [{
+    text: `Automation task "${task.name}" failed: ${error}`
+  }]
+}
+```
+
+Automation progress events (intermediate steps like "navigated to order book", "click failed, retrying") are injected as `role: "user"` content parts with no trailing model turn request — this updates Gemini's context without triggering a response generation. Gemini only speaks about automation when the final complete/failed injection arrives.
+
+---
+
+## 8. Session State (In-Memory)
+
+```ts
+interface SessionState {
+  sessionId:    string
+  send:         (msg: ServerMessage) => void  // delivers to extension via gateway
+
+  // Task slots
+  researchSlots:    [Task | null, Task | null]
+  automationSlot:   Task | null
+  cancelledTasks:   Set<string>
+
+  // Gemini Live session handle
+  geminiSession:    GeminiLiveSession
+}
+```
+
+---
+
+## 9. Conversation History (Redis)
+
+The Gemini Live session maintains its own rolling context internally. Redis stores a persistent conversation summary that survives reconnects and is injected into the Gemini session system prompt on reconnect.
 
 ```ts
 // Key: `conversation:{sessionId}`
 interface ConversationHistory {
-  summary: string          // rolling compressed summary of all older turns
-  recentTurns: Turn[]      // last N turns kept verbatim (N = 6)
+  summary:      string    // rolling compressed summary of all older turns
+  recentTurns:  Turn[]    // last 6 turns kept verbatim
 }
 
 interface Turn {
-  role: "user" | "assistant"
-  content: string
+  role:      "user" | "model"
+  content:   string
   timestamp: number
 }
 ```
 
 ### Rolling Summary Strategy
 
-The LLM context never grows unboundedly. After each turn, if `recentTurns.length > 3`, the oldest turn is compressed into `summary` and dropped from `recentTurns`.
-
-The summary is a **ordered list of concise facts** — what the user asked, what was done, what the result was. No filler. No explanations.
+Gemini Live does not have discrete turns in the same sense as a REST call. The Node backend writes to Redis on two triggers: (1) when a tool result is injected — marking the end of a meaningful exchange, and (2) on session close — capturing the final state. If `recentTurns.length > 6`, the oldest turn is compressed into `summary` as one concise fact line. The summary is an ordered list — what the user asked, what was done, what the result was.
 
 Example:
 ```
-1. User asked about DANGCEM stock price. Voice agent researched and reported ₦18.50.
-2. User asked to place a buy order for 500 units. Web agent filled the form. User confirmed. Order submitted successfully.
-3. User asked about portfolio balance. Voice agent read the page. Reported ₦2.3M available.
+1. User asked about DANGCEM stock price. Researched and reported ₦18.50.
+2. User asked to place a buy order for 500 units. Web agent filled the form. User confirmed. Order submitted.
+3. User asked about portfolio balance. Read the page. Reported ₦2.3M available.
 ```
 
-Each new summary is generated by the LLM itself — the voice agent sends the oldest turn to Claude with the instruction: *"Add this to the existing summary as one concise fact. Keep the list ordered. Be brief."*
-
-### What the LLM Receives Per Turn
-
-Only these go into the LLM context:
-
-| Input | Always? | Notes |
-|---|---|---|
-| `summary` | Yes | Compressed history — bounded size |
-| `recentTurns` (last 3) | Yes | Verbatim recent turns |
-| `transcript_input` | Yes | Current user utterance |
-| `automationState` | Yes | Current automation description or null — so LLM knows if web agent is busy |
-| `researchState` | Yes | Current research description or null — so LLM knows if research is in progress |
-| `screenshot` | Only when page context needed | Base64 PNG — for visual description and page awareness |
-| `research result` | Only when research completes | Full result as a single tool_result |
-| `action_result` on failure | Only on failure | Voice agent handles success silently in code |
-
-Action successes, automation progress events, and research chunks are **never injected into the LLM context**. They are operational state managed by the voice agent in code. The voice agent generates narration for the user independently — it does not need the LLM to narrate every step.
-
-Loaded from Redis at the start of each turn. Written back to Redis after each turn.
+On reconnect, the summary + recent turns are injected into the Gemini session system prompt so the conversation resumes with full context.
 
 ---
 
-## 8. Voice Agent Loop
+## 10. Web Agent (Extension-Side)
 
-The voice agent is the brain. It is the only component that reads incoming extension messages and decides what to do. It streams always — it talks *through* tool execution, never *after* it.
-
-```
-Extension sends transcript_input
-  → Gateway routes to Voice Agent
-  → Voice Agent loads { summary, recentTurns } from Redis
-  → Voice Agent builds LLM input: [summary, recentTurns, current transcript]
-  → Voice Agent starts LLM call (Claude API, prompt caching)
-
-  LLM may call tools:
-
-  tool: request_dom_snapshot
-    → Voice Agent calls session.send({ type: "dom_snapshot_request", taskType })
-    → Gateway delivers to Extension
-    → Extension captures screenshot + element map, sends dom_snapshot back
-    → Gateway routes dom_snapshot to Voice Agent
-    → Voice Agent feeds screenshot into next LLM call as visual context
-    → LLM continues
-
-  tool: browser_action  [LLM provides: browserActionTask — e.g. "Find the order form and fill quantity with 500"]
-    → Voice Agent sets session.currentAutomationDescription from browserActionTask
-    → Voice Agent calls WebAgent(task: browserActionTask, elementMap, screenshot) via BAML
-    → Web agent returns ordered list of WebActions
-    → Voice Agent sets session.currentAutomationDescription and calls session.send({ type: "automation_start", ... })
-    → Voice Agent sends each action as session.send({ type: "action", intent, isCritical })
-    → For each action:
-        - success → Voice Agent updates automation state in code silently
-        - failure → Voice Agent feeds action_result error as tool_result into next LLM call
-        - critical action (buy/sell/withdraw) → Voice Agent calls session.send({ type: "user_action_required", actionId, taskId, description })
-          → UI presents action to user. Voice agent pauses and waits for user_action_result.
-    → Voice Agent calls session.send({ type: "automation_end", ... }) when done
-    → Voice Agent sets session.currentAutomationDescription = null
-
-  tool: research  [LLM provides: researchQuestion — e.g. "What are DANGCEM Q3 2024 earnings?"] [ONLY if Research Agent is enabled — see Section 13]
-    → Voice Agent sets session.isResearching = true, session.researchDescription = researchQuestion
-    → Research Agent runs — streams chunks to extension as research_chunk (UI feedback only, NOT fed to voice agent or LLM)
-    → Research complete → Voice Agent receives full result as a single return value
-    → Voice Agent sets session.isResearching = false, session.researchDescription = null
-    → Voice Agent feeds full result as tool_result into LLM
-    → LLM generates response using the complete result
-
-  → BAML function returns LLM response
-  → TTSProvider.synthesize(text) → audio buffer
-  → Voice Agent calls session.send({ type: "speech_audio", ... })
-  → Extension plays audio via Web Audio API
-  → Voice Agent compresses history and writes { summary, recentTurns } back to Redis
-```
-
-### Task Conflict Handling
-
-Before starting any new task, the voice agent checks `session.activeTasks`. If a task is running:
-- Voice agent surfaces the conflict via speech: *"I'm already checking MTNN — you just asked me to check DANGCEM. Should I finish MTNN first or switch now?"*
-- If switching: cancel active task, start new one
-- If queuing: push to `session.taskQueue` with a LLM-generated `queuedReason`
-- When active task ends: dequeue next task, tell user: *"Now starting what you asked earlier — [description]"*
-
----
-
-## 9. Web Agent (Extension-Side, Pluggable)
-
-The web agent is code inside the extension — content scripts that touch the DOM. It is not a server. It receives instructions from the voice agent (via the gateway) and reports results back.
-
-### Pluggability
-
-The web agent is optional. If the web agent content scripts are not loaded or report unavailable, the voice agent degrades gracefully:
-
-- Voice agent detects no `action_result` within timeout, or extension sends an explicit `{ type: "automation_status", state: "cancelled", error: "web_agent_unavailable" }`
-- Voice agent tells the user: *"I'm unable to perform browser actions right now."*
-- All other functionality (conversation, research) continues normally.
+The web agent is content scripts inside the extension — it touches the DOM. It receives instructions from the Node backend (via the gateway) and reports results back.
 
 ### DOM Snapshot Strategy
 
-The extension sends a **two-part payload** in every `dom_snapshot`:
+Every `dom_snapshot` contains two parts:
 
-1. **Screenshot** — base64 PNG of the visible viewport. Gives the LLM visual/spatial awareness so it can describe the page naturally ("GTCO is right between Zenith and First Bank on the equity page"). Always included.
+1. **Screenshot** — base64 PNG of the visible viewport.
+2. **Compressed element map** — unique `element_id` assigned to every interactable element, with position data kept in extension memory.
 
-2. **Compressed element map** — the extension scans the live DOM, assigns a unique `element_id` to every interactable element (`button`, `input`, `select`, `a`, `[role=button]`, scrollable containers, relevant text blocks), and computes `getBoundingClientRect()` center coordinates for each. The LLM receives a flattened text map. The extension keeps the ID→coords mapping in memory.
-
-Example element map entry:
 ```
 [Button id=42, text="Confirm Trade", role="button"]
 [Input id=17, placeholder="Quantity", type="number"]
 [Container id=8, text="GTCO 45.20 +1.2%", scrollable=true]
 ```
 
-The LLM never sees or generates coordinates. It outputs an `element_id` and the extension handles all execution.
+The web agent LLM (GPT-4o via BAML) receives the map and screenshot, outputs structured `WebIntent` actions referencing `element_id` values only — never coordinates.
 
 ### Action Execution
 
-The LLM outputs a strict intent schema. The extension translates intents into native browser API calls:
-
-**Click / Hover**
-```json
-{ "action": "click", "element_id": 42 }
-```
-Extension: looks up ID 42, uses `getBoundingClientRect()` center, dispatches native `MouseEvent`.
-
-**Type**
-```json
-{ "action": "type", "element_id": 17, "value": "500" }
-```
-Extension: focuses the input, dispatches native `InputEvent`.
-
-**Scroll**
-```json
-{ "action": "scroll", "element_id": 15, "direction": "down", "amount": 500 }
-```
-`element_id` is optional — if null, scrolls the main window. Extension uses `element.scrollBy({ top: 500, behavior: "smooth" })`.
-
-**Highlight**
-```json
-{ "action": "highlight", "element_id": 8, "text_snippet": "Babcock University" }
-```
-Extension: locates element ID 8, searches for the text string, uses browser `Range` and `Selection` APIs to highlight it. Used to draw the user's attention to something on the page.
-
-**Safety rule:** Any action where `isCritical: true` (buy, sell, withdraw, confirm) is blocked by the extension. It returns `action_result` with `success: false, error: "requires_confirmation"`. The voice agent then emits `user_action_required` and waits for the user to confirm before retrying.
-
-### action_result Flow (detailed)
-
-```
-Voice Agent → session.send({ type: "action", actionId, taskId, intent, isCritical })
-  → Gateway delivers to Extension
-  → Content script looks up element_id in its ID→coords map
-  → Content script dispatches native browser API call
-  → Content script → background.ts (chrome.runtime.sendMessage)
-  → background.ts → Gateway (WebSocket send)
-  → Gateway routes to Voice Agent
-  → Voice Agent receives { type: "action_result", actionId, taskId, success }
-  → Voice Agent continues
-```
-
----
-
-## 10. Web Automation Technique — How the Extension Executes Actions
-
-This section explains the exact mechanism the extension uses to automate the browser. A developer implementing the web agent content script must follow this precisely.
-
-### Step 1 — DOM Scan and Element Map Construction
-
-When the extension receives a `dom_snapshot_request`, a content script runs on the active tab and does the following:
-
-1. Queries all interactable elements: `button`, `input`, `select`, `textarea`, `a[href]`, `[role=button]`, `[role=link]`, `[role=menuitem]`, `[role=option]`, and any element with a scroll overflow.
-2. Assigns each element a unique integer `element_id` (incrementing from 1, reset per snapshot).
-3. Calls `element.getBoundingClientRect()` on each element to get its position and size. Computes the center point: `{ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }`.
-4. Stores the mapping `element_id → { element: DOMElement, coords: {x, y} }` in content script memory.
-5. Builds a compressed text representation of the map:
-```
-[Button id=1, text="Login", role="button"]
-[Input id=2, placeholder="Email", type="email"]
-[Input id=3, placeholder="Password", type="password"]
-[Container id=4, text="Order Book", scrollable=true]
-```
-6. Captures a screenshot using the Chrome `chrome.tabs.captureVisibleTab()` API (base64 PNG).
-7. Sends both as a `dom_snapshot` message to the gateway.
-
-### Step 2 — LLM Decides Intent
-
-The backend passes the element map and screenshot to the Web Agent (GPT-4o). The LLM reads the map, understands the page visually from the screenshot, and outputs a list of `WebAction` intents referencing only `element_id` values it received. It never generates coordinates.
-
-### Step 3 — Extension Executes Intents
-
-The extension receives `action` messages one by one from the gateway. For each:
-
 **click**
 ```ts
-const { element, coords } = elementMap.get(intent.element_id)
 element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: coords.x, clientY: coords.y }))
 element.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, clientX: coords.x, clientY: coords.y }))
 element.dispatchEvent(new MouseEvent("click",     { bubbles: true, clientX: coords.x, clientY: coords.y }))
@@ -384,7 +324,6 @@ element.dispatchEvent(new MouseEvent("click",     { bubbles: true, clientX: coor
 
 **type**
 ```ts
-const { element } = elementMap.get(intent.element_id)
 element.focus()
 element.dispatchEvent(new InputEvent("input", { bubbles: true, data: intent.value }))
 ;(element as HTMLInputElement).value = intent.value
@@ -393,174 +332,126 @@ element.dispatchEvent(new Event("change", { bubbles: true }))
 
 **scroll**
 ```ts
-const target = intent.element_id ? elementMap.get(intent.element_id).element : window
-const amount = intent.direction === "down" ? intent.amount : -intent.amount
-target.scrollBy({ top: amount, behavior: "smooth" })
+const target = intent.element_id ? elementMap.get(intent.element_id)!.element : window
+target.scrollBy({ top: intent.direction === "down" ? intent.amount : -intent.amount, behavior: "smooth" })
 ```
 
 **highlight**
 ```ts
-const { element } = elementMap.get(intent.element_id)
-const text = element.textContent ?? ""
-const index = text.indexOf(intent.text_snippet)
-if (index === -1) { /* report failure */ return }
 const range = document.createRange()
 range.setStart(element.firstChild!, index)
 range.setEnd(element.firstChild!, index + intent.text_snippet.length)
-const selection = window.getSelection()!
-selection.removeAllRanges()
-selection.addRange(range)
+window.getSelection()!.removeAllRanges()
+window.getSelection()!.addRange(range)
 ```
 
-**Critical action guard**
+**Critical action guard:** Any action where `isCritical: true` (buy, sell, withdraw, confirm) is blocked by the extension. It returns `action_result` with `success: false, error: "requires_confirmation"`. The server emits `user_action_required` and waits for `user_action_result` before retrying.
+
+### Automation Progress → Context Injection
+
+As the web automation task runs, the Node backend receives `action_result` messages and builds a time-series log:
+
 ```ts
-if (intent.isCritical) {
-  // Do NOT execute. Report back immediately.
-  sendToBackground({ type: "action_result", actionId, taskId, success: false, error: "requires_confirmation" })
-  return
+interface AutomationProgressEvent {
+  timestamp: number
+  description: string   // e.g. "Navigated to order book page"
+                        //      "Failed to click confirm button — retrying"
+                        //      "Filled quantity field with 500"
 }
 ```
 
-### Step 4 — Report Result
-
-After execution (success or failure), the content script sends `action_result` to `background.ts` via `chrome.runtime.sendMessage`. `background.ts` forwards it over the WebSocket to the gateway.
+Each progress event is injected into the Gemini session as a silent context part (no speech triggered). When the task ends (complete or failed), a final injection is sent that Gemini can speak about.
 
 ---
 
 ## 11. BAML — Agent Definitions
 
-All three agents are defined as BAML functions in `apps/api/baml_src/`. BAML generates a type-safe TypeScript client that the voice agent, web agent, and research agent call instead of raw Claude API calls.
-
-Benefits:
-- Structured outputs enforced by schema — no manual JSON parsing
-- Prompt and model config live in `.baml` files, not scattered in TypeScript
-- Swapping models (e.g. Claude Sonnet → Opus) is a one-line change in the BAML config
-- Prompt caching configured once in BAML, applied automatically
+Web agent and research agent are BAML functions. BAML generates a type-safe TypeScript client.
 
 ```
 apps/api/
 └── baml_src/
-    ├── clients.baml        — model + caching config (Claude API key, model, cache settings)
-    ├── voice_agent.baml    — VoiceAgent function: input = transcript + history, output = response + tool calls
-    ├── web_agent.baml      — WebAgent function: input = task + pruned accessibility tree + content snapshot, output = structured actions
-    └── research_agent.baml — ResearchAgent function: input = question, output = structured summary
+    ├── clients.baml         — model config (GPT-4o for web agent, Gemini 1.5 Flash for research)
+    ├── web_agent.baml       — WebAgent: input = task + element map + screenshot → structured WebIntent list
+    └── research_agent.baml  — ResearchAgent: input = question → structured summary
 ```
 
-The generated BAML client lives at `apps/api/baml_client/` (gitignored, generated at build time).
+Swapping models is a one-line change in `clients.baml`. The TaskManager never calls the Gemini Live API — it calls BAML.
 
 ---
 
-## 12. TTSProvider Interface (Swappable)
+## 12. Extension — Audio Streaming
 
-```ts
-interface TTSProvider {
-  synthesize(text: string): Promise<Buffer>  // returns audio/mp3 buffer
-}
-```
+The extension streams raw PCM audio from the microphone to the gateway in `audio_chunk` messages. The gateway forwards chunks to the Node backend, which pipes them into the Gemini Live session's input stream.
 
-- **OpenAITTSProvider** — Phase 4 implementation, uses OpenAI `tts-1` model
-- Future providers (ElevenLabs, etc.) drop in with the same interface
+Gemini Live output audio (PCM) is streamed back the same way: Node → gateway → extension. The extension plays each chunk via the Web Audio API as it arrives — no buffering wait for a complete response.
 
-The voice agent calls `ttsProvider.synthesize(text)` and sends the result as `speech_audio` chunks. Swapping providers requires changing only which implementation is instantiated.
+The mic button in `pill.tsx` starts and stops the audio stream. There is no `SpeechProvider` interface, no transcript messages, no Web Speech API.
 
 ---
 
-## 13. SpeechProvider Interface (Swappable)
+## 13. Development Phases
 
-```ts
-interface SpeechProvider {
-  start(): void
-  stop(): void
-  onTranscript: (text: string, isFinal: boolean) => void
-}
-```
-
-- **WebSpeechProvider** — Phase 3, uses browser Web Speech API, sends `transcript_input` messages
-- **WhisperProvider** — future drop-in, streams `audio_chunk` messages to backend Whisper endpoint, same interface
-
-Swapping providers requires changing only which implementation is instantiated — the voice agent loop does not change.
-
----
-
-## 14. Research Agent (Backend-Side, Pluggable, Phase 7)
-
-```ts
-interface ResearchAgent {
-  query(question: string, taskId: string, onChunk: (text: string, isFinal: boolean) => void): Promise<void>
-  cancel(taskId: string): void
-}
-```
-
-### Pluggability
-
-The research agent is fully optional. The voice agent checks `researchAgent.isAvailable()` before calling `query`. If unavailable:
-
-- Voice agent tells the user: *"I'm unable to research right now."*
-- Conversation and browser automation continue normally.
-
-The voice agent is built and tested without the research agent. The research agent is wired in Phase 5 without modifying the voice agent loop — only the tool registration changes.
-
-### Streaming
-
- The voice agent can cancel mid-stream via `researchAgent.cancel(taskId)`.
-
----
-
-## 15. Development Phases
-
-### Phase 1 — API Foundation
-- `apps/api`: uws gateway, TypeScript, tsconfig
+### Phase 1 — API Foundation ✓
+- uws gateway, TypeScript, tsconfig
 - `packages/types`: full message schema
-- Gateway: accepts connections, manages `SessionState` in-memory, routes messages, logs
-- Redis: local Docker, connection wired, conversation history store ready
-- Root `turbo.json` pipeline
+- Redis connection + conversation history store
+- Session state in-memory
 
-### Phase 2 — Extension WebSocket Client
+### Phase 2 — Extension WebSocket Client ✓
 - `background.ts` WebSocket client: connects on install, reconnects on drop
-- Chrome `runtime.sendMessage` relay between `background.ts` and content scripts
-- End-to-end handshake verified
+- `chrome.runtime.sendMessage` relay between `background.ts` and content scripts
 
-### Phase 3 — Voice Input
-- `SpeechProvider` interface in `packages/types`
-- `WebSpeechProvider` implementation in extension
-- Mic button in `pill.tsx` activates recognition
-- `transcript_input` flows: extension → gateway → voice agent (logged)
+### Phase 3 — Voice Input (STT via Web Speech API) ✓
+- `WebSpeechProvider` in extension, mic button in `pill.tsx`
+- `transcript_input` flows end-to-end (now superseded by Phase 5)
 
-### Phase 4 — Voice Agent (Conversation)
-- Voice agent loop: `transcript_input` → LLM → TTS → `speech_audio` → extension plays
-- Claude API with prompt caching
-- Redis conversation history: load on turn start, append on turn end
-- Multi-turn context working end-to-end
+### Phase 4 — Voice Agent Conversation (BAML + GPT-4o + OpenAI TTS) ✓
+- Voice turn loop working end-to-end (now superseded by Phase 5)
 
-### Phase 5 — Web Agent: DOM Reading
-- `src/contents/dom-watcher.ts`: handles `dom_snapshot_request`, captures task-aware DOM
-- Sends `dom_snapshot` back to gateway → voice agent
+### Phase 5 — Gemini Live Voice Session (replaces Phases 3 + 4)
+- Remove `WebSpeechProvider`, `SpeechProvider` interface, `TTSProvider` interface, `OpenAITTSProvider`, `handleTranscript`, BAML voice_agent
+- `GeminiLiveSession` class: wraps Gemini Live WebSocket, streams PCM audio in/out
+- Extension: replace `transcript_input` flow with PCM audio streaming via `audio_chunk`
+- `pill.tsx`: replace mic button → Web Speech API flow with mic → PCM capture → `audio_chunk`
+- Gemini session config: declare `dispatch_research`, `dispatch_automation`, `cancel_task` tools
+- End-to-end voice conversation working through Gemini Live
 
-### Phase 6 — Web Agent: Action Execution
-- `src/contents/action-executor.ts`: receives `action`, executes hybrid parallel strategy
-- `action_result` relay: content script → background → gateway → voice agent
-- Full automation lifecycle: start / pause / resume / cancel / end / progress
-- Web agent pluggability + degraded mode enforced
+### Phase 6 — TaskManager + Research Agent
+- `TaskManager`: slot enforcement, `AbortController` per task, `cancelledTasks` set, result injection
+- `ResearchAgent` BAML function (Gemini 1.5 Flash)
+- `dispatch_research` tool wired: fires background job, immediate acknowledgement, result injected on completion
+- Conflict handling for research slots
+- Guaranteed cancel for research tasks
 
-### Phase 7 — Research Agent
-- `ResearchAgent` interface + first implementation
-- Voice agent registers research as a tool (no other voice agent changes)
-- Streaming chunks, real-time narration, cancel mid-stream
-- Research agent pluggability + degraded mode enforced
+### Phase 7 — Web Agent: DOM Reading
+- `dom-watcher.ts` content script: handles `dom_snapshot_request`, captures DOM + screenshot
+- `dom_snapshot` flows: extension → gateway → Node → web agent (BAML + GPT-4o)
 
-### Phase 8 — Proactive Conversation
-- Voice agent evaluates incoming DOM snapshots proactively
-- Triggers unprompted speech when it detects interesting context
+### Phase 8 — Web Agent: Action Execution
+- `action-executor.ts` content script: receives `action`, executes DOM automation
+- `action_result` relay: content script → background → gateway → Node
+- Full automation lifecycle: start / end / progress / cancel
+- Automation progress events injected as silent context into Gemini session
+- `dispatch_automation` tool wired: fires background job, immediate acknowledgement
+- Critical action guard + `user_action_required` flow
+- Conflict handling for automation slot
+- Guaranteed cancel for automation tasks
 
-### Phase 9 — Landing Page
+### Phase 9 — Proactive Context Awareness
+- Gemini session receives page context (DOM snapshots) proactively when user navigates
+- Gemini can comment on page state without being asked
+
+### Phase 10 — Landing Page
 - `apps/web` — built last, after the product works
 
 ---
 
-## 16. Out of Scope (Future)
+## 14. Out of Scope (Future)
 
 - User accounts + authentication
-- TTS provider selection / voice customization
-- Whisper STT implementation
-- Research Agent as a separate process
+- Multiple Gemini voice / language options
+- Research Agent as a separate process / service
 - Deployment / containerization
+- Whisper STT (superseded by Gemini Live native STT)
+- OpenAI TTS (superseded by Gemini Live native TTS)
