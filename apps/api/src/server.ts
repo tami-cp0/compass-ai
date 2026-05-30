@@ -3,33 +3,52 @@ import { v4 as uuidv4 } from "uuid"
 import type { ExtensionMessage, ServerMessage } from "@compass-ai/types"
 import { createSession, deleteSession, sessionCount } from "./session-store.js"
 import { logger } from "./logger.js"
-import { handleTranscript } from "./voice-agent.js"
+import { GeminiLiveSession } from "./gemini-live-session.js"
+import { getConversationHistory } from "./redis.js"
 
 const PORT = Number(process.env.PORT ?? 8787)
+
+// Extended session handle — lives only in the API app, not in shared types
+interface ApiSession {
+  sessionId:    string
+  gemini:       GeminiLiveSession
+}
+
+const apiSessions = new Map<string, ApiSession>()
 
 export function startServer(): void {
   const app = App()
 
   app.ws<{ sessionId: string }>("/ws", {
-    compression: DISABLED,
+    compression:      DISABLED,
     maxPayloadLength: 16 * 1024 * 1024,
-    idleTimeout: 120,
+    idleTimeout:      120,
 
-    open(ws) {
+    async open(ws) {
       const sessionId = uuidv4()
       ws.getUserData().sessionId = sessionId
-      createSession(sessionId, (msg: ServerMessage) => {
-        ws.send(JSON.stringify(msg))
-      })
+
+      const send = (msg: ServerMessage) => ws.send(JSON.stringify(msg))
+      createSession(sessionId, send)
+
+      // Load prior history for system prompt
+      const history = await getConversationHistory(sessionId)
+
+      const gemini = new GeminiLiveSession(sessionId, send, history)
+      await gemini.connect()
+
+      apiSessions.set(sessionId, { sessionId, gemini })
+
       ws.send(JSON.stringify({ type: "session_init", sessionId } satisfies ServerMessage))
       logger.info("Client connected", { sessionId, total: sessionCount() })
-      logger.info("session_init sent", { sessionId })
     },
 
     message(ws, rawMessage) {
       const { sessionId } = ws.getUserData()
-      let msg: ExtensionMessage
+      const apiSession = apiSessions.get(sessionId)
+      if (!apiSession) return
 
+      let msg: ExtensionMessage
       try {
         msg = JSON.parse(Buffer.from(rawMessage).toString("utf8")) as ExtensionMessage
       } catch {
@@ -37,17 +56,21 @@ export function startServer(): void {
         return
       }
 
-      logger.info("Message received", { sessionId, type: msg.type })
-
-      if (msg.type === "transcript_input" && msg.isFinal) {
-        handleTranscript(sessionId, msg.text).catch((err: unknown) => {
-          logger.error("handleTranscript error", { sessionId, error: String(err) })
-        })
+      if (msg.type === "audio_chunk") {
+        apiSession.gemini.sendAudio(msg.data)
+        return
       }
+
+      logger.warn("Unhandled message type", { sessionId, type: msg.type })
     },
 
-    close(ws, code) {
+    async close(ws, code) {
       const { sessionId } = ws.getUserData()
+      const apiSession = apiSessions.get(sessionId)
+      if (apiSession) {
+        await apiSession.gemini.close()
+        apiSessions.delete(sessionId)
+      }
       deleteSession(sessionId)
       logger.info("Client disconnected", { sessionId, code, total: sessionCount() })
     },
