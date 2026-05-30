@@ -1,32 +1,22 @@
-import type { ServerMessage } from "./messages"
+import type { ServerMessage } from "./messages.js"
 
-export interface QueuedTask {
-  taskId: string
-  type: "automation" | "research"
-  description: string
-  queuedReason: string
-  queuedAt: number
-}
+export type TaskType   = "research" | "automation"
+export type TaskStatus = "running" | "completed" | "failed" | "cancelled"
 
-export interface ActiveTask {
-  type: "automation" | "research"
-  description: string
+export interface Task {
+  taskId:          string
+  type:            TaskType
+  name:            string
+  description:     string
+  status:          TaskStatus
+  startedAt:       number
 }
 
 export interface SessionState {
-  sessionId: string
-  send: (msg: ServerMessage) => void
+  sessionId:      string
+  send:           (msg: ServerMessage) => void
 
-  // Automation state
-  automationState: "idle" | "running" | "paused" | "cancelled"
-  currentTaskId: string | null
-  currentAutomationDescription: string | null
-
-  // Research state
-  isResearching: boolean
-  researchDescription: string | null
-
-  // Task queue
-  activeTasks: Map<string, ActiveTask>
-  taskQueue: QueuedTask[]
+  researchSlots:  [Task | null, Task | null]
+  automationSlot: Task | null
+  cancelledTasks: Set<string>
 }

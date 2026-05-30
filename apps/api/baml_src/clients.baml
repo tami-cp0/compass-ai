@@ -4,14 +4,6 @@ generator my_client {
   version "0.75.0"
 }
 
-client<llm> Claude {
-  provider anthropic
-  options {
-    model "claude-sonnet-4-6"
-    api_key env.ANTHROPIC_API_KEY
-  }
-}
-
 client<llm> GPT4o {
   provider openai
   options {

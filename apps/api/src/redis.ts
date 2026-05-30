@@ -1,7 +1,14 @@
 import { Redis } from "ioredis"
 import { logger } from "./logger.js"
+import * as dotenv from "dotenv"
+dotenv.config()
 
-const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379"
+
+if (!process.env.REDIS_URL) {
+  throw new Error("REDIS_URL environment variable is not set")
+}
+
+const REDIS_URL = process.env.REDIS_URL
 
 export const redis = new Redis(REDIS_URL, {
   lazyConnect: true,
@@ -26,8 +33,6 @@ export interface ConversationHistory {
   recentTurns: Turn[]
 }
 
-const MAX_RECENT_TURNS = 6
-
 export async function getConversationHistory(sessionId: string): Promise<ConversationHistory> {
   const raw = await redis.get(`conversation:${sessionId}`)
   if (!raw) return { summary: "", recentTurns: [] }
@@ -36,14 +41,17 @@ export async function getConversationHistory(sessionId: string): Promise<Convers
 
 export async function appendConversationTurn(
   sessionId: string,
-  turn: { role: "user" | "assistant"; content: string },
-  newSummary?: string
+  turn: { role: "user" | "assistant"; content: string }
 ): Promise<void> {
   const history = await getConversationHistory(sessionId)
   history.recentTurns.push({ ...turn, timestamp: Date.now() })
-  if (newSummary !== undefined) {
-    history.summary = newSummary
-    history.recentTurns = history.recentTurns.slice(-MAX_RECENT_TURNS)
+
+  while (history.recentTurns.length > 3) {
+    const oldest = history.recentTurns.shift()!
+    const index = history.summary ? history.summary.split("\n").length + 1 : 1
+    const line = `${index}. ${oldest.role === "user" ? "User" : "Assistant"}: ${oldest.content}`
+    history.summary = history.summary ? `${history.summary}\n${line}` : line
   }
+
   await redis.set(`conversation:${sessionId}`, JSON.stringify(history))
 }

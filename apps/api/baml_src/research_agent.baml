@@ -4,7 +4,7 @@ class ResearchOutput {
 }
 
 function ResearchAgent(question: string) -> ResearchOutput {
-  client Claude
+  client GPT4o
   prompt #"
     You are the research agent for a financial trading platform.
     Answer the following question with concise, factual information.

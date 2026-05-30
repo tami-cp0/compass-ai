@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid"
 import type { ExtensionMessage, ServerMessage } from "@compass-ai/types"
 import { createSession, deleteSession, sessionCount } from "./session-store.js"
 import { logger } from "./logger.js"
+import { handleTranscript } from "./voice-agent.js"
 
 const PORT = Number(process.env.PORT ?? 8787)
 
@@ -20,7 +21,9 @@ export function startServer(): void {
       createSession(sessionId, (msg: ServerMessage) => {
         ws.send(JSON.stringify(msg))
       })
+      ws.send(JSON.stringify({ type: "session_init", sessionId } satisfies ServerMessage))
       logger.info("Client connected", { sessionId, total: sessionCount() })
+      logger.info("session_init sent", { sessionId })
     },
 
     message(ws, rawMessage) {
@@ -35,6 +38,12 @@ export function startServer(): void {
       }
 
       logger.info("Message received", { sessionId, type: msg.type })
+
+      if (msg.type === "transcript_input" && msg.isFinal) {
+        handleTranscript(sessionId, msg.text).catch((err: unknown) => {
+          logger.error("handleTranscript error", { sessionId, error: String(err) })
+        })
+      }
     },
 
     close(ws, code) {

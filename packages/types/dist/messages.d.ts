@@ -1,16 +1,12 @@
 export type ExtensionMessage = {
-    type: "transcript_input";
-    sessionId: string;
-    text: string;
-    isFinal: boolean;
-} | {
     type: "audio_chunk";
     sessionId: string;
     data: string;
-    mimeType: string;
+    mimeType: "audio/pcm";
 } | {
     type: "dom_snapshot";
     sessionId: string;
+    taskId: string;
     taskType: DomTaskType;
     screenshot: string;
     elementMap: string;
@@ -22,11 +18,6 @@ export type ExtensionMessage = {
     success: boolean;
     error?: string;
 } | {
-    type: "automation_status";
-    sessionId: string;
-    taskId: string;
-    state: "running" | "paused" | "cancelled";
-} | {
     type: "user_action_result";
     sessionId: string;
     actionId: string;
@@ -34,16 +25,10 @@ export type ExtensionMessage = {
     confirmed: boolean;
 };
 export type ServerMessage = {
-    type: "transcript";
-    sessionId: string;
-    text: string;
-    isFinal: boolean;
-} | {
-    type: "speech_audio";
+    type: "audio_chunk";
     sessionId: string;
     data: string;
-    mimeType: "audio/mp3";
-    isFinal: boolean;
+    mimeType: "audio/pcm";
 } | {
     type: "action";
     sessionId: string;
@@ -57,45 +42,20 @@ export type ServerMessage = {
     taskId: string;
     taskType: DomTaskType;
 } | {
-    type: "automation_start";
-    sessionId: string;
-    taskId: string;
-    description: string;
-} | {
-    type: "automation_pause";
-    sessionId: string;
-    taskId: string;
-} | {
-    type: "automation_resume";
-    sessionId: string;
-    taskId: string;
-} | {
-    type: "automation_cancel";
-    sessionId: string;
-    taskId: string;
-} | {
     type: "automation_end";
     sessionId: string;
     taskId: string;
     reason: "complete" | "cancelled" | "error";
     error?: string;
 } | {
-    type: "automation_progress";
-    sessionId: string;
-    taskId: string;
-    description: string;
-} | {
-    type: "research_chunk";
-    sessionId: string;
-    taskId: string;
-    text: string;
-    isFinal: boolean;
-} | {
     type: "user_action_required";
     sessionId: string;
     actionId: string;
     taskId: string;
     description: string;
+} | {
+    type: "session_init";
+    sessionId: string;
 };
 export type DomTaskType = "click" | "form" | "read" | "structure";
 export type WebIntent = {

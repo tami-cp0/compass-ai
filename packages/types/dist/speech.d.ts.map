@@ -1,0 +1,1 @@
+{"version":3,"file":"speech.d.ts","sourceRoot":"","sources":["../src/speech.ts"],"names":[],"mappings":"AAAA,MAAM,WAAW,cAAc;IAC7B,KAAK,IAAI,IAAI,CAAA;IACb,IAAI,IAAI,IAAI,CAAA;IACZ,YAAY,EAAE,CAAC,CAAC,IAAI,EAAE,MAAM,EAAE,OAAO,EAAE,OAAO,KAAK,IAAI,CAAC,GAAG,IAAI,CAAA;CAChE"}
