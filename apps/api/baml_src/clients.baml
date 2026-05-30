@@ -11,3 +11,11 @@ client<llm> GPT4o {
     api_key env.OPENAI_API_KEY
   }
 }
+
+client<llm> GeminiFlash {
+  provider google-ai
+  options {
+    model "gemini-1.5-flash"
+    api_key env.GOOGLE_API_KEY
+  }
+}

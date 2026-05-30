@@ -2,10 +2,12 @@ packages:
   - 'apps/*'
   - 'packages/*'
 allowBuilds:
+  '@google/genai': true
   '@parcel/watcher': true
   '@scarf/scarf': false
   '@swc/core': true
   esbuild: true
   lmdb: true
   msgpackr-extract: true
+  protobufjs: true
   sharp: true
