@@ -59,6 +59,7 @@ export class GeminiLiveSession {
   private send:       (msg: ServerMessage) => void
   private history:    ConversationHistory
   private session:    Session | null = null
+  private outputTranscriptBuffer = ""
 
   // Tool call handlers — wired by TaskManager in Phase 6
   onDispatchResearch:  ((name: string, description: string) => Record<string, unknown>) | null = null
@@ -110,7 +111,7 @@ export class GeminiLiveSession {
     })
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.session?.close()
     this.session = null
   }
@@ -135,10 +136,17 @@ export class GeminiLiveSession {
       )
     }
 
-    // Transcript — write model speech to Redis on turn complete
+    // Buffer incremental output transcription
     const outputTranscript = msg.serverContent?.outputTranscription
-    if (outputTranscript?.text && msg.serverContent?.turnComplete) {
-      appendTurn(this.sessionId, { role: "model", content: outputTranscript.text }).catch(
+    if (outputTranscript?.text) {
+      this.outputTranscriptBuffer += outputTranscript.text
+    }
+
+    // Flush buffered transcript to Redis on turn complete
+    if (msg.serverContent?.turnComplete && this.outputTranscriptBuffer) {
+      const text = this.outputTranscriptBuffer
+      this.outputTranscriptBuffer = ""
+      appendTurn(this.sessionId, { role: "model", content: text }).catch(
         (err: unknown) => logger.error("Redis appendTurn failed", { sessionId: this.sessionId, error: String(err) })
       )
     }
@@ -150,6 +158,10 @@ export class GeminiLiveSession {
     const responses: Array<{ id: string; name: string; response: Record<string, unknown> }> = []
 
     for (const call of toolCall.functionCalls) {
+      if (!call.args) {
+        responses.push({ id: call.id ?? "", name: call.name ?? "", response: { error: "missing args" } })
+        continue
+      }
       const args = call.args as Record<string, string>
       let result: Record<string, unknown>
 

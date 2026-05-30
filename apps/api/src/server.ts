@@ -35,9 +35,9 @@ export function startServer(): void {
       const history = await getConversationHistory(sessionId)
 
       const gemini = new GeminiLiveSession(sessionId, send, history)
-      await gemini.connect()
-
       apiSessions.set(sessionId, { sessionId, gemini })
+
+      await gemini.connect()
 
       ws.send(JSON.stringify({ type: "session_init", sessionId } satisfies ServerMessage))
       logger.info("Client connected", { sessionId, total: sessionCount() })
