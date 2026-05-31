@@ -64,9 +64,10 @@ const Pill = () => {
     chrome.runtime.sendMessage(reply, () => {
       if (chrome.runtime.lastError) {
         console.error("[compass] user_action_result send failed:", chrome.runtime.lastError.message)
+        return
       }
+      setConfirmation(null)
     })
-    setConfirmation(null)
   }, [confirmation])
 
   const startListening = useCallback(async () => {
