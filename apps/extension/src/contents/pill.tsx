@@ -24,9 +24,10 @@ const Pill = () => {
   // Incoming audio from Gemini via background → play it
   useEffect(() => {
     const onMessage = (msg: ServerMessage) => {
-      if (msg.type !== "audio_chunk") return
+      if (msg.type !== "audio_chunk") return false
       player.resume()
       player.play(msg.data)
+      return false
     }
     chrome.runtime.onMessage.addListener(onMessage)
     return () => chrome.runtime.onMessage.removeListener(onMessage)

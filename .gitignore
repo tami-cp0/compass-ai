@@ -1,4 +1,4 @@
 node_modules/
 .env
 graphify-out/
-.graphify_python
+.graphify*
