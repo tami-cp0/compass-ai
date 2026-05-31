@@ -74,8 +74,22 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(connect, delayMs)
 }
 
+// Handle screenshot capture requests from content scripts
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type !== "capture_screenshot_request") return false
+  const windowId = sender.tab?.windowId
+  chrome.tabs.captureVisibleTab(
+    windowId,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    { format: "webp", quality: 75 } as any,
+    (dataUrl: string) => { sendResponse({ dataUrl }) }
+  )
+  return true // keep channel open for async response
+})
+
 // Relay outbound messages from content scripts to the gateway
-chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage) => {
+chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage | { type: "capture_screenshot_request" }) => {
+  if (message.type === "capture_screenshot_request") return false
   if (!ws || ws.readyState !== WebSocket.OPEN || !sessionId) {
     console.warn("[compass] dropping message — not connected", message)
     return

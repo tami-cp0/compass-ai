@@ -13,6 +13,7 @@ const PORT = Number(process.env.PORT ?? 8787)
 interface ApiSession {
   sessionId:    string
   gemini:       GeminiLiveSession
+  taskManager:  TaskManager
 }
 
 const apiSessions = new Map<string, ApiSession>()
@@ -36,9 +37,9 @@ export function startServer(): void {
       const history = await getConversationHistory(sessionId)
 
       const gemini = new GeminiLiveSession(sessionId, send, history)
-      apiSessions.set(sessionId, { sessionId, gemini })
-
       const taskManager = new TaskManager(session, gemini)
+      apiSessions.set(sessionId, { sessionId, gemini, taskManager })
+
       gemini.onDispatchResearch   = (name, desc) => taskManager.dispatchResearch(name, desc)
       gemini.onDispatchAutomation = (name, desc) => taskManager.dispatchAutomation(name, desc)
       gemini.onCancelTask         = (taskId)     => taskManager.cancel(taskId)
@@ -64,6 +65,11 @@ export function startServer(): void {
 
       if (msg.type === "audio_chunk") {
         apiSession.gemini.sendAudio(msg.data)
+        return
+      }
+
+      if (msg.type === "dom_snapshot") {
+        apiSession.taskManager.handleDomSnapshot(msg)
         return
       }
 
