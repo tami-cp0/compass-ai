@@ -146,11 +146,11 @@ export class TaskManager {
     if (action.action === "type" && action.element_id != null && action.value != null) {
       return { action: "type", element_id: action.element_id, value: action.value }
     }
-    if (action.action === "scroll" && action.direction != null && action.amount != null) {
+    if (action.action === "scroll" && (action.direction === "up" || action.direction === "down") && action.amount != null) {
       return {
         action:     "scroll",
         element_id: action.element_id ?? null,
-        direction:  action.direction as "up" | "down",
+        direction:  action.direction,
         amount:     action.amount,
       }
     }
@@ -295,6 +295,14 @@ export class TaskManager {
           const action = actions[i]
           const result = await this._executeAction(taskId, action)
           logger.info("Action executed", { taskId, step: i + 1, action: action.action, success: result.success, error: result.error })
+
+          if (this.session.cancelledTasks.has(taskId)) {
+            this.session.automationSlot = null
+            this.abortControllers.delete(taskId)
+            this._sendAutomationEnd(taskId, "cancelled")
+            logger.info("Automation cancelled after action returned", { taskId, step: i + 1 })
+            return
+          }
 
           if (!result.success) {
             this.session.automationSlot = null
