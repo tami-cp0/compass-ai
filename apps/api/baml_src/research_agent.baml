@@ -1,17 +1,28 @@
-class ResearchOutput {
-  summary string @description("Concise factual summary of findings, ordered by relevance")
-  sources string[] @description("URLs or source names consulted")
+class TemporalValidation {
+  data_as_of_date             string
+  most_recent_quarter_analyzed string
 }
 
-function ResearchAgent(question: string) -> ResearchOutput {
-  client GPT4o
-  prompt #"
-    You are the research agent for a financial trading platform.
-    Answer the following question with concise, factual information.
-    Focus on recent data. No filler and only output data from credible sources
+class BaselineMetrics {
+  price          float?
+  pe_ratio       float?
+  pb_ratio       float?
+  roe            float?
+  roa            float?
+  eps_ttm        float?
+  eps_forward    float?
+  dividend_yield float?
+}
 
-    Question: {{ question }}
+class DynamicContext {
+  identified_themes         string[]
+  scraped_evidence          string[]
+  macro_regulatory_updates  string[]
+}
 
-    {{ ctx.output_format }}
-  "#
+class ResearchOutput {
+  user_original_query string
+  temporal_validation TemporalValidation
+  baseline_metrics    BaselineMetrics
+  dynamic_context     DynamicContext
 }
