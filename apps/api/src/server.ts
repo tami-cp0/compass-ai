@@ -73,7 +73,17 @@ export function startServer(): void {
         return
       }
 
-      logger.warn("Unhandled message type", { sessionId, type: msg.type })
+      if (msg.type === "action_result") {
+        apiSession.taskManager.handleActionResult(msg)
+        return
+      }
+
+      if (msg.type === "user_action_result") {
+        apiSession.taskManager.handleUserActionResult(msg)
+        return
+      }
+
+      logger.warn("Unhandled message type", { sessionId, type: (msg as ExtensionMessage).type })
     },
 
     async close(ws, code) {
