@@ -3,18 +3,21 @@ import { logger } from "./logger.js"
 import { appendTurn, type ConversationHistory } from "./redis.js"
 import type { ServerMessage } from "@compass-ai/types"
 
-if (!process.env.GOOGLE_API_KEY) {
-  throw new Error("GOOGLE_API_KEY environment variable is not set")
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error("GEMINI_API_KEY environment variable is not set")
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY })
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 
-const SYSTEM_PROMPT = `You are Compass, an AI voice assistant for a financial trading platform.
+const SYSTEM_PROMPT = `You are Compass, an assistant.
 You help users navigate the platform, place trades, and research stocks.
-You never go silent waiting for a tool result — acknowledge tool dispatch and keep talking.
+You never go silent waiting for a tool result — acknowledge tool dispatch and keep talking naturally based on context.
 When you receive a message prefixed with [automation context], absorb it silently as background
 information. Do not read it aloud or acknowledge it unless the user asks what you are doing
-or the task completes.`
+or the task completes.
+When dispatching a research task, reconstruct the user's intent into a precise, keyword-dense research question. Include the ticker symbol, the specific time period, and all financial metrics or narrative themes the user mentioned or implied. Do not echo the user's words — synthesize their intent into the best possible search query.
+Once you have dispatched a research task, the description is already submitted and cannot be changed — it is gone, it is running. Do not ask the user any follow-up questions about what they want to know or what aspect to focus on. There is nothing to clarify. The result will arrive on its own. Simply acknowledge briefly and keep the conversation going naturally.
+When you receive a message prefixed with [research_result], that is your back office returning the data you requested. Deliver it like a colleague who just got a notification — transition naturally, start with the most important point, say them in plain conversational language, and invite the user's reaction, then proceed from there with the rest of the information if you think it is necessary. Do not list numbers robotically. Do not read out every metric. Talk like a person.`
 
 const TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
@@ -23,8 +26,14 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
     parametersJsonSchema: {
       type: "object",
       properties: {
-        name:        { type: "string", description: "Short label, e.g. 'DANGCEM Q3 earnings'" },
-        description: { type: "string", description: "Full research question" },
+        name: {
+          type: "string",
+          description: "Short label identifying this research task. Example: \"DANGCEM Q3 2025 earnings\"",
+        },
+        description: {
+          type: "string",
+          description: "Precise, keyword-dense research question synthesized from the conversation. Include the ticker symbol, specific time period, and all financial metrics or narrative themes the user mentioned or implied. Example: \"DANGCEM Q3 2025 revenue, EBITDA margin, dividend declared, impact of naira devaluation on input costs\". Do not paraphrase the user — synthesize their intent into the best possible search query.",
+        },
       },
       required: ["name", "description"],
     },
@@ -78,18 +87,18 @@ export class GeminiLiveSession {
       : ""
 
     this.session = await ai.live.connect({
-      model: "gemini-2.0-flash-live-001",
+      model: "gemini-3.1-flash-live-preview",
       config: {
         systemInstruction: SYSTEM_PROMPT + historyContext,
         tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
         responseModalities: [Modality.AUDIO],
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } },
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Gacrux" } },
         },
       },
       callbacks: {
         onopen:   () => logger.info("Gemini Live connected", { sessionId: this.sessionId }),
-        onclose:  () => logger.info("Gemini Live closed",    { sessionId: this.sessionId }),
+        onclose:  (e) => logger.info("Gemini Live closed",    { sessionId: this.sessionId, code: (e as {code?:number;reason?:string})?.code, reason: (e as {code?:number;reason?:string})?.reason }),
         onerror:  (e) => logger.error("Gemini Live error",  { sessionId: this.sessionId, error: String(e) }),
         onmessage: (msg: LiveServerMessage) => this.handleMessage(msg),
       },
