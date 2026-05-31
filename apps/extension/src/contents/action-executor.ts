@@ -70,7 +70,10 @@ async function executeIntent(intent: WebIntent, registry: Map<number, Element>):
   if (intent.action === "type") {
     const el = registry.get(intent.element_id)
     if (!el) throw new Error(`Element ID ${intent.element_id} not found`)
-    const input = el as HTMLInputElement | HTMLTextAreaElement
+    if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) {
+      throw new Error(`Element ID ${intent.element_id} is not a typeable input (got ${el.tagName})`)
+    }
+    const input = el
     input.focus()
     input.value = intent.value
     input.dispatchEvent(new Event("input", { bubbles: true }))
