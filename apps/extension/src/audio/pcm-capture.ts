@@ -1,56 +1,53 @@
+import workletUrl from "url:./pcm-capture-worklet.js"
+
 type OnChunk = (base64Pcm: string) => void
 
 export class PcmCapture {
-  private mediaRecorder: MediaRecorder | null = null
-  private audioCtx:      AudioContext | null  = null
-  private onChunk:       OnChunk
+  private audioCtx: AudioContext | null = null
+  private stream:   MediaStream | null  = null
+  private onChunk:  OnChunk
 
   constructor(onChunk: OnChunk) {
     this.onChunk = onChunk
   }
 
   async start(): Promise<void> {
-    const stream = await navigator.mediaDevices.getUserMedia({
+    this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        channelCount:  1,
-        sampleRate:    16000,
+        channelCount:     1,
+        sampleRate:       16000,
         echoCancellation: true,
         noiseSuppression: true,
       },
     })
 
     this.audioCtx = new AudioContext({ sampleRate: 16000 })
-    const source  = this.audioCtx.createMediaStreamSource(stream)
 
-    // ScriptProcessor gives us raw float32 PCM chunks (deprecated but universally supported in Chrome extensions)
-    // AudioWorklet requires registering a separate worklet file, which is complex in Plasmo.
-    const processor = this.audioCtx.createScriptProcessor(4096, 1, 1)
-    processor.onaudioprocess = (e) => {
-      const float32 = e.inputBuffer.getChannelData(0)
+    await this.audioCtx.audioWorklet.addModule(workletUrl)
+
+    const source    = this.audioCtx.createMediaStreamSource(this.stream)
+    const worklet   = new AudioWorkletNode(this.audioCtx, "pcm-capture-processor")
+
+    worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+      const float32 = new Float32Array(e.data)
       const int16   = new Int16Array(float32.length)
       for (let i = 0; i < float32.length; i++) {
         int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768))
       }
-      // Use a loop instead of spread to avoid stack overflow on large arrays
       let binary = ""
       const bytes = new Uint8Array(int16.buffer)
       for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
-      const base64 = btoa(binary)
-      this.onChunk(base64)
+      this.onChunk(btoa(binary))
     }
 
-    source.connect(processor)
-    processor.connect(this.audioCtx.destination)
-
-    this.mediaRecorder = new MediaRecorder(stream)
-    this.mediaRecorder.start()
+    source.connect(worklet)
+    worklet.connect(this.audioCtx.destination)
   }
 
   stop(): void {
-    this.mediaRecorder?.stop()
-    this.mediaRecorder?.stream.getTracks().forEach(t => t.stop())
+    this.stream?.getTracks().forEach(t => t.stop())
     this.audioCtx?.close()
-    this.mediaRecorder = null
-    this.audioCtx      = null
+    this.stream   = null
+    this.audioCtx = null
   }
 }
