@@ -5,6 +5,7 @@ import { createSession, deleteSession, sessionCount } from "./session-store.js"
 import { logger } from "./logger.js"
 import { GeminiLiveSession } from "./gemini-live-session.js"
 import { getConversationHistory } from "./redis.js"
+import { TaskManager } from "./task-manager.js"
 
 const PORT = Number(process.env.PORT ?? 8787)
 
@@ -29,13 +30,18 @@ export function startServer(): void {
       ws.getUserData().sessionId = sessionId
 
       const send = (msg: ServerMessage) => ws.send(JSON.stringify(msg))
-      createSession(sessionId, send)
+      const session = createSession(sessionId, send)
 
       // Load prior history for system prompt
       const history = await getConversationHistory(sessionId)
 
       const gemini = new GeminiLiveSession(sessionId, send, history)
       apiSessions.set(sessionId, { sessionId, gemini })
+
+      const taskManager = new TaskManager(session, gemini)
+      gemini.onDispatchResearch   = (name, desc) => taskManager.dispatchResearch(name, desc)
+      gemini.onDispatchAutomation = (name, desc) => taskManager.dispatchAutomation(name, desc)
+      gemini.onCancelTask         = (taskId)     => taskManager.cancel(taskId)
 
       await gemini.connect()
 
