@@ -15,23 +15,59 @@ export const getStyle = () => {
   return style
 }
 
+interface PendingConfirmation {
+  actionId:    string
+  taskId:      string
+  description: string
+}
+
 const player = new PcmPlayer(24000)
 
 const Pill = () => {
-  const [listening, setListening]   = useState(false)
+  const [listening, setListening]       = useState(false)
+  const [confirmation, setConfirmation] = useState<PendingConfirmation | null>(null)
   const captureRef = useRef<PcmCapture | null>(null)
 
-  // Incoming audio from Gemini via background → play it
   useEffect(() => {
     const onMessage = (msg: ServerMessage) => {
-      if (msg.type !== "audio_chunk") return false
-      player.resume()
-      player.play(msg.data)
+      if (msg.type === "audio_chunk") {
+        player.resume()
+        player.play(msg.data)
+        return false
+      }
+      if (msg.type === "user_action_required") {
+        setConfirmation({
+          actionId:    msg.actionId,
+          taskId:      msg.taskId,
+          description: msg.description,
+        })
+        return false
+      }
+      if (msg.type === "automation_end") {
+        setConfirmation(null)
+        return false
+      }
       return false
     }
     chrome.runtime.onMessage.addListener(onMessage)
     return () => chrome.runtime.onMessage.removeListener(onMessage)
   }, [])
+
+  const sendConfirmation = useCallback((confirmed: boolean) => {
+    if (!confirmation) return
+    const reply: OutboundExtensionMessage = {
+      type:     "user_action_result",
+      actionId: confirmation.actionId,
+      taskId:   confirmation.taskId,
+      confirmed,
+    }
+    chrome.runtime.sendMessage(reply, () => {
+      if (chrome.runtime.lastError) {
+        console.error("[compass] user_action_result send failed:", chrome.runtime.lastError.message)
+      }
+    })
+    setConfirmation(null)
+  }, [confirmation])
 
   const startListening = useCallback(async () => {
     const capture = new PcmCapture((base64Pcm: string) => {
@@ -84,6 +120,24 @@ const Pill = () => {
             )}
           </button>
         </div>
+
+        {confirmation && (
+          <div className="relative z-10 border-t border-white/30 px-3 py-2 flex flex-col gap-2 max-w-xs">
+            <p className="text-xs text-gray-800 leading-snug">{confirmation.description}</p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => sendConfirmation(false)}
+                className="text-xs px-2 py-1 rounded border border-gray-300 bg-white/80 hover:bg-white">
+                Cancel
+              </button>
+              <button
+                onClick={() => sendConfirmation(true)}
+                className="text-xs px-2 py-1 rounded border border-blue-400 bg-blue-500 text-white hover:bg-blue-600">
+                Confirm
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
