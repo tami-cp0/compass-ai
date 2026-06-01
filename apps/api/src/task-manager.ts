@@ -14,10 +14,12 @@ export class TaskManager {
   private pendingSnapshots         = new Map<string, (msg: Extract<ExtensionMessage, { type: "dom_snapshot" }> | null) => void>()
   private pendingActionResults     = new Map<string, (msg: Extract<ExtensionMessage, { type: "action_result" }> | null) => void>()
   private pendingUserActionResults = new Map<string, (msg: Extract<ExtensionMessage, { type: "user_action_result" }> | null) => void>()
+  private pendingScreenshots       = new Map<string, (dataUrl: string) => void>()
 
   constructor(session: SessionState, gemini: GeminiLiveSession) {
     this.session = session
     this.gemini  = gemini
+    gemini.onRequestScreenshot = () => this._requestScreenshot()
   }
 
   dispatchResearch(name: string, description: string): Record<string, unknown> {
@@ -127,6 +129,34 @@ export class TaskManager {
       this.pendingUserActionResults.delete(msg.actionId)
       resolve(msg)
     }
+  }
+
+  handleScreenshotResponse(msg: Extract<ExtensionMessage, { type: "screenshot_response" }>): void {
+    const resolve = this.pendingScreenshots.get(msg.requestId)
+    if (resolve) {
+      this.pendingScreenshots.delete(msg.requestId)
+      resolve(msg.dataUrl)
+    }
+  }
+
+  private _requestScreenshot(): Promise<string> {
+    const requestId = uuidv4()
+    this.session.send({
+      type:      "screenshot_request",
+      sessionId: this.session.sessionId,
+      requestId,
+    })
+
+    return new Promise<string>((resolve) => {
+      this.pendingScreenshots.set(requestId, resolve)
+
+      setTimeout(() => {
+        if (this.pendingScreenshots.has(requestId)) {
+          this.pendingScreenshots.delete(requestId)
+          resolve("")
+        }
+      }, 10_000)
+    })
   }
 
   private _sendAutomationEnd(taskId: string, reason: "complete" | "cancelled" | "error", error?: string): void {
