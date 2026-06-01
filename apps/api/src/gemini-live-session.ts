@@ -196,7 +196,7 @@ export class GeminiLiveSession {
             turnComplete: false,
           })
         }
-        result = { status: "captured" }
+        result = dataUrl ? { status: "captured" } : { status: "failed", reason: "capture_error" }
       } else {
         // All other tools require args
         if (!call.args) {
