@@ -241,6 +241,40 @@ function isInsideGrid(el: Element, gridSelector: string): boolean {
   return el.closest(gridSelector) !== null
 }
 
+function collectDisplayBlocks(gridSelector: string): Set<Element> {
+  const candidates: Element[] = []
+
+  document.querySelectorAll<Element>("div, span, p, li, dd, dt").forEach((el) => {
+    if (!isVisible(el)) return
+    if (isInsideGrid(el, gridSelector)) return
+    if (el.querySelector(INTERACTABLE_SELECTOR) !== null) return
+    const text = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
+    if (text.length < 3) return
+    candidates.push(el)
+  })
+
+  // Keep only outermost qualifying containers — drop descendants of already-kept elements
+  const kept = new Set<Element>()
+  for (const el of candidates) {
+    let dominated = false
+    for (const other of kept) {
+      if (other.contains(el)) {
+        dominated = true
+        break
+      }
+    }
+    if (!dominated) {
+      // Remove any already-kept elements that are descendants of this one
+      for (const other of kept) {
+        if (el.contains(other)) kept.delete(other)
+      }
+      kept.add(el)
+    }
+  }
+
+  return kept
+}
+
 function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<Element, number>): string {
   const sections: string[] = []
 
@@ -249,6 +283,7 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
   const visibleLines:   string[] = []
   const offscreenLines: string[] = []
   const gridSections:   string[] = []
+  const displayBlocks   = collectDisplayBlocks(gridSelector)
 
   // Process grids first
   document.querySelectorAll<Element>(gridSelector).forEach((grid) => {
@@ -259,6 +294,12 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
       gridSections.push(label + "\n" + gridMd)
     }
   })
+
+  // Emit display blocks — visible containers with no interactable descendants
+  for (const el of displayBlocks) {
+    const text = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
+    visibleLines.push(`[TEXT]: "${text}"`)
+  }
 
   // Process interactables
   for (const [eid, el] of registry) {
@@ -304,6 +345,12 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
   document.querySelectorAll<Element>("h1, h2, h3, label").forEach((el) => {
     if (!isVisible(el)) return
     if (isInsideGrid(el, gridSelector)) return
+    // Skip labels whose content is already captured inside a display block
+    if (el.tagName.toLowerCase() === "label") {
+      for (const block of displayBlocks) {
+        if (block.contains(el)) return
+      }
+    }
     const tag = el.tagName.toLowerCase()
     const text = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
     if (!text) return
