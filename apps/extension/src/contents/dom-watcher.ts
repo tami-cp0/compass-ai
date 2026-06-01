@@ -46,6 +46,35 @@ chrome.runtime.onMessage.addListener((msg: ServerMessage) => {
       })
     return false
   }
+  if (msg.type === "screenshot_request") {
+    captureScreenshot()
+      .then((dataUrl) => {
+        const reply: OutboundMessage = {
+          type:      "screenshot_response",
+          requestId: msg.requestId,
+          dataUrl,
+        }
+        chrome.runtime.sendMessage(reply, () => {
+          if (chrome.runtime.lastError) {
+            console.error("[compass] screenshot_response send failed:", chrome.runtime.lastError.message)
+          }
+        })
+      })
+      .catch((err: unknown) => {
+        const reply: OutboundMessage = {
+          type:      "screenshot_response",
+          requestId: msg.requestId,
+          dataUrl:   "",
+        }
+        chrome.runtime.sendMessage(reply, () => {
+          if (chrome.runtime.lastError) {
+            console.error("[compass] screenshot_response (error) send failed:", chrome.runtime.lastError.message)
+          }
+        })
+        console.error("[compass] captureScreenshot failed for screenshot_request:", err)
+      })
+    return false
+  }
   return false
 })
 
