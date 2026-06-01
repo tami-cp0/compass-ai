@@ -284,6 +284,7 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
   const offscreenLines: string[] = []
   const gridSections:   string[] = []
   const displayBlocks   = collectDisplayBlocks(gridSelector)
+  const visibleEntries: Array<{ el: Element; line: string }> = []
 
   // Process grids first
   document.querySelectorAll<Element>(gridSelector).forEach((grid) => {
@@ -295,10 +296,10 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
     }
   })
 
-  // Emit display blocks — visible containers with no interactable descendants
+  // Stage display blocks for DOM-ordered emit
   for (const el of displayBlocks) {
     const text = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
-    visibleLines.push(`[TEXT]: "${text}"`)
+    visibleEntries.push({ el, line: `[TEXT]: "${text}"` })
   }
 
   // Process interactables
@@ -334,10 +335,21 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
     }
 
     if (visible) {
-      visibleLines.push(label)
+      visibleEntries.push({ el, line: label })
     } else {
       offscreenLines.push(label + " [Off-screen]")
     }
+  }
+
+  // Emit visible entries in DOM order
+  visibleEntries.sort((a, b) => {
+    const pos = a.el.compareDocumentPosition(b.el)
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1
+    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1
+    return 0
+  })
+  for (const { line } of visibleEntries) {
+    visibleLines.push(line)
   }
 
   // Add semantic text (headings + labels) for visible viewport
@@ -345,11 +357,9 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
   document.querySelectorAll<Element>("h1, h2, h3, label").forEach((el) => {
     if (!isVisible(el)) return
     if (isInsideGrid(el, gridSelector)) return
-    // Skip labels whose content is already captured inside a display block
-    if (el.tagName.toLowerCase() === "label") {
-      for (const block of displayBlocks) {
-        if (block.contains(el)) return
-      }
+    // Skip elements whose content is already captured inside a display block
+    for (const block of displayBlocks) {
+      if (block.contains(el)) return
     }
     const tag = el.tagName.toLowerCase()
     const text = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
