@@ -110,7 +110,7 @@ export class GeminiLiveSession {
         onopen:   () => logger.info("Gemini Live connected", { sessionId: this.sessionId }),
         onclose:  (e) => logger.info("Gemini Live closed",    { sessionId: this.sessionId, code: (e as {code?:number;reason?:string})?.code, reason: (e as {code?:number;reason?:string})?.reason }),
         onerror:  (e) => logger.error("Gemini Live error",  { sessionId: this.sessionId, error: String(e) }),
-        onmessage: (msg: LiveServerMessage) => this.handleMessage(msg),
+        onmessage: (msg: LiveServerMessage) => { this.handleMessage(msg).catch((err: unknown) => logger.error("handleMessage error", { sessionId: this.sessionId, error: String(err) })) },
       },
     })
   }
@@ -177,20 +177,10 @@ export class GeminiLiveSession {
     const responses: Array<{ id: string; name: string; response: Record<string, unknown> }> = []
 
     for (const call of toolCall.functionCalls) {
-      if (!call.args) {
-        responses.push({ id: call.id ?? "", name: call.name ?? "", response: { error: "missing args" } })
-        continue
-      }
-      const args = call.args as Record<string, string>
       let result: Record<string, unknown>
 
-      if (call.name === "dispatch_research" && this.onDispatchResearch) {
-        result = this.onDispatchResearch(args.name, args.description)
-      } else if (call.name === "dispatch_automation" && this.onDispatchAutomation) {
-        result = this.onDispatchAutomation(args.name, args.description)
-      } else if (call.name === "cancel_task" && this.onCancelTask) {
-        result = this.onCancelTask(args.taskId)
-      } else if (call.name === "request_screenshot" && this.onRequestScreenshot) {
+      // Handle no-args tools first, before the args guard
+      if (call.name === "request_screenshot" && this.onRequestScreenshot) {
         const dataUrl = await this.onRequestScreenshot()
         if (dataUrl) {
           const commaIdx = dataUrl.indexOf(",")
@@ -208,7 +198,22 @@ export class GeminiLiveSession {
         }
         result = { status: "captured" }
       } else {
-        result = { status: "acknowledged", note: "Tool handler not yet wired" }
+        // All other tools require args
+        if (!call.args) {
+          responses.push({ id: call.id ?? "", name: call.name ?? "", response: { error: "missing args" } })
+          continue
+        }
+        const args = call.args as Record<string, string>
+
+        if (call.name === "dispatch_research" && this.onDispatchResearch) {
+          result = this.onDispatchResearch(args.name, args.description)
+        } else if (call.name === "dispatch_automation" && this.onDispatchAutomation) {
+          result = this.onDispatchAutomation(args.name, args.description)
+        } else if (call.name === "cancel_task" && this.onCancelTask) {
+          result = this.onCancelTask(args.taskId)
+        } else {
+          result = { status: "acknowledged", note: "Tool handler not yet wired" }
+        }
       }
 
       responses.push({ id: call.id ?? "", name: call.name ?? "", response: result })
