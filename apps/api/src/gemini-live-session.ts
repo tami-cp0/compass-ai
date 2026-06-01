@@ -61,6 +61,15 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
       required: ["taskId"],
     },
   },
+  {
+    name: "request_screenshot",
+    description: "Capture a screenshot of the user's current browser viewport. Use this when you need to see the page to understand its state, identify what is visible, or gather context before dispatching research or automation.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
 ]
 
 export class GeminiLiveSession {
@@ -74,6 +83,7 @@ export class GeminiLiveSession {
   onDispatchResearch:  ((name: string, description: string) => Record<string, unknown>) | null = null
   onDispatchAutomation: ((name: string, description: string) => Record<string, unknown>) | null = null
   onCancelTask:         ((taskId: string) => Record<string, unknown>) | null = null
+  onRequestScreenshot: (() => Promise<string>) | null = null
 
   constructor(sessionId: string, send: (msg: ServerMessage) => void, history: ConversationHistory) {
     this.sessionId = sessionId
@@ -125,12 +135,12 @@ export class GeminiLiveSession {
     this.session = null
   }
 
-  private handleMessage(msg: LiveServerMessage): void {
+  private async handleMessage(msg: LiveServerMessage): Promise<void> {
     // Audio output — stream back to extension
     const audioPart = msg.serverContent?.modelTurn?.parts?.find(p => p.inlineData?.mimeType?.startsWith("audio/"))
     if (audioPart?.inlineData) {
       this.send({
-        type:     "audio_chunk",
+        type:      "audio_chunk",
         sessionId: this.sessionId,
         data:      audioPart.inlineData.data ?? "",
         mimeType:  "audio/pcm",
@@ -180,8 +190,24 @@ export class GeminiLiveSession {
         result = this.onDispatchAutomation(args.name, args.description)
       } else if (call.name === "cancel_task" && this.onCancelTask) {
         result = this.onCancelTask(args.taskId)
+      } else if (call.name === "request_screenshot" && this.onRequestScreenshot) {
+        const dataUrl = await this.onRequestScreenshot()
+        if (dataUrl) {
+          const commaIdx = dataUrl.indexOf(",")
+          const base64   = commaIdx !== -1 ? dataUrl.slice(commaIdx + 1) : dataUrl
+          this.session?.sendClientContent({
+            turns: [{
+              role:  "user",
+              parts: [
+                { text: "[page screenshot]" },
+                { inlineData: { mimeType: "image/jpeg", data: base64 } },
+              ],
+            }],
+            turnComplete: false,
+          })
+        }
+        result = { status: "captured" }
       } else {
-        // Stub response — TaskManager not wired yet (Phase 6+)
         result = { status: "acknowledged", note: "Tool handler not yet wired" }
       }
 
