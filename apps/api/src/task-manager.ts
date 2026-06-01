@@ -139,6 +139,26 @@ export class TaskManager {
     })
   }
 
+  private _requestSnapshot(taskId: string): Promise<Extract<ExtensionMessage, { type: "dom_snapshot" }> | null> {
+    this.session.send({
+      type:      "dom_snapshot_request",
+      sessionId: this.session.sessionId,
+      taskId,
+      taskType:  "structure",
+    })
+
+    return new Promise((resolve) => {
+      this.pendingSnapshots.set(taskId, resolve)
+
+      setTimeout(() => {
+        if (this.pendingSnapshots.has(taskId)) {
+          this.pendingSnapshots.delete(taskId)
+          resolve(null)
+        }
+      }, 10_000)
+    })
+  }
+
   private _buildIntent(action: WebAction): WebIntent | null {
     if (action.action === "click" && action.element_id != null) {
       return { action: "click", element_id: action.element_id }
@@ -314,6 +334,33 @@ export class TaskManager {
             )
             logger.error("Automation step failed", { taskId, name, step: i + 1, error: errorMsg })
             return
+          }
+
+          // Re-snapshot after each successful non-final action so the next
+          // action's element IDs reflect the updated DOM state
+          if (i < actions.length - 1) {
+            const freshSnapshot = await this._requestSnapshot(taskId)
+
+            if (this.session.cancelledTasks.has(taskId)) {
+              this.session.automationSlot = null
+              this.abortControllers.delete(taskId)
+              this._sendAutomationEnd(taskId, "cancelled")
+              logger.info("Automation cancelled while re-snapshotting", { taskId, step: i + 1 })
+              return
+            }
+
+            if (!freshSnapshot) {
+              this.session.automationSlot = null
+              this.abortControllers.delete(taskId)
+              this._sendAutomationEnd(taskId, "error", `Re-snapshot timed out after step ${i + 1}`)
+              this.gemini.injectContent(
+                `[automation context] Task "${name}" failed: DOM snapshot timed out after step ${i + 1} (${action.description})`
+              )
+              logger.error("Re-snapshot timed out", { taskId, name, step: i + 1 })
+              return
+            }
+
+            logger.info("Re-snapshot received", { taskId, step: i + 1 })
           }
         }
 
