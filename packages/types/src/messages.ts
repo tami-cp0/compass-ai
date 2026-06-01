@@ -4,6 +4,7 @@ export type ExtensionMessage =
   | { type: "dom_snapshot"; sessionId: string; taskId: string; taskType: DomTaskType; screenshot: string; elementMap: string }
   | { type: "action_result"; sessionId: string; actionId: string; taskId: string; success: boolean; error?: string }
   | { type: "user_action_result"; sessionId: string; actionId: string; taskId: string; confirmed: boolean }
+  | { type: "screenshot_response"; sessionId: string; requestId: string; dataUrl: string }
 
 // Node → Gateway → Extension
 export type ServerMessage =
@@ -13,6 +14,7 @@ export type ServerMessage =
   | { type: "automation_end"; sessionId: string; taskId: string; reason: "complete" | "cancelled" | "error"; error?: string }
   | { type: "user_action_required"; sessionId: string; actionId: string; taskId: string; description: string }
   | { type: "session_init"; sessionId: string }
+  | { type: "screenshot_request"; sessionId: string; requestId: string }
 
 export type DomTaskType = "click" | "form" | "read" | "structure"
 
