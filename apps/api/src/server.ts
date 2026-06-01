@@ -83,6 +83,11 @@ export function startServer(): void {
         return
       }
 
+      if (msg.type === "screenshot_response") {
+        apiSession.taskManager.handleScreenshotResponse(msg)
+        return
+      }
+
       logger.warn("Unhandled message type", { sessionId, type: (msg as ExtensionMessage).type })
     },
 
