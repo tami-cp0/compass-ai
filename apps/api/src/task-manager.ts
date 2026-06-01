@@ -442,6 +442,12 @@ export class TaskManager {
       this.pendingUserActionResults.delete(actionId)
     }
 
+    // Unblock all pending screenshot requests
+    for (const [requestId, resolve] of this.pendingScreenshots) {
+      resolve("")
+      this.pendingScreenshots.delete(requestId)
+    }
+
     const slotIndex = this.session.researchSlots.findIndex(s => s?.taskId === taskId)
     if (slotIndex !== -1) {
       (this.session.researchSlots as Array<Task | null>)[slotIndex] = null
