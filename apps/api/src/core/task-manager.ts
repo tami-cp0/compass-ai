@@ -496,6 +496,16 @@ export class TaskManager {
 					logger.info('Automation cancelled after act step', { taskId, step: history.length + 1 });
 					return;
 				}
+
+				if (step.needs_element_map) {
+					this.session.automationSlot = null;
+					this.abortControllers.delete(taskId);
+					const errorMsg = `Agent requested elementMap again after it was already provided (step ${history.length + 1})`;
+					this._sendAutomationEnd(taskId, 'error', errorMsg);
+					this.gemini.injectContent(`[automation context] Task "${name}" failed: ${errorMsg}`);
+					logger.error('Agent needs_element_map after elementMap provided', { taskId, name, step: history.length + 1 });
+					return;
+				}
 			}
 
 			if (step.is_failed) {
