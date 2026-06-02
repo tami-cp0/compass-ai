@@ -24,8 +24,9 @@ interface PendingConfirmation {
 const player = new PcmPlayer(24000)
 
 const Pill = () => {
-  const [listening, setListening]       = useState(false)
-  const [confirmation, setConfirmation] = useState<PendingConfirmation | null>(null)
+  const [listening, setListening]             = useState(false)
+  const [isAutomationRunning, setIsAutomationRunning] = useState(false)
+  const [confirmation, setConfirmation]       = useState<PendingConfirmation | null>(null)
   const captureRef = useRef<PcmCapture | null>(null)
 
   useEffect(() => {
@@ -33,6 +34,10 @@ const Pill = () => {
       if (msg.type === "audio_chunk") {
         player.resume()
         player.play(msg.data)
+        return false
+      }
+      if (msg.type === "action") {
+        setIsAutomationRunning(true)
         return false
       }
       if (msg.type === "user_action_required") {
@@ -44,6 +49,7 @@ const Pill = () => {
         return false
       }
       if (msg.type === "automation_end") {
+        setIsAutomationRunning(false)
         setConfirmation(null)
         return false
       }
@@ -71,6 +77,7 @@ const Pill = () => {
   }, [confirmation])
 
   const startListening = useCallback(async () => {
+    chrome.runtime.sendMessage({ type: "session_start" })
     const capture = new PcmCapture((base64Pcm: string) => {
       const msg: OutboundExtensionMessage = {
         type:     "audio_chunk",
@@ -87,6 +94,7 @@ const Pill = () => {
   const stopListening = useCallback(() => {
     captureRef.current?.stop()
     captureRef.current = null
+    chrome.runtime.sendMessage({ type: "session_end" })
     setListening(false)
   }, [])
 

@@ -8,6 +8,33 @@ type OutboundMessage = StripSessionId<ExtensionMessage>
 export const elementRegistry = new Map<string, Map<number, Element>>()
 //                                      taskId    elementId  element
 
+// Single persistent port to background — keeps the MV3 service worker alive across
+// all async operations so captureVisibleTab and WebSocket sends always complete.
+let relayPort: chrome.runtime.Port
+
+let screenshotResolve: ((dataUrl: string) => void) | null = null
+
+function connectRelayPort(): void {
+  relayPort = chrome.runtime.connect({ name: "compass-relay" })
+  relayPort.onMessage.addListener((msg: { type: string; dataUrl?: string }) => {
+    if (msg.type === "capture_screenshot_response" && screenshotResolve) {
+      const resolve = screenshotResolve
+      screenshotResolve = null
+      resolve(msg.dataUrl ?? "")
+    }
+  })
+  relayPort.onDisconnect.addListener(() => {
+    // Service worker was killed; reconnect so next operation works
+    connectRelayPort()
+  })
+}
+
+connectRelayPort()
+
+function relayToBackground(message: OutboundMessage): void {
+  relayPort.postMessage(message)
+}
+
 chrome.runtime.onMessage.addListener((msg: ServerMessage) => {
   if (msg.type === "dom_snapshot_request") {
     handleSnapshotRequest(msg.taskId, msg.taskType).catch(console.error)
@@ -16,32 +43,21 @@ chrome.runtime.onMessage.addListener((msg: ServerMessage) => {
   if (msg.type === "action") {
     handleAction(msg.taskId, msg.actionId, msg.intent)
       .then((result) => {
-        const reply: OutboundMessage = {
+        relayToBackground({
           type:     "action_result",
           actionId: msg.actionId,
           taskId:   msg.taskId,
           success:  result.success,
           ...(result.error ? { error: result.error } : {}),
-        }
-        chrome.runtime.sendMessage(reply, () => {
-          if (chrome.runtime.lastError) {
-            console.error("[compass] action_result send failed:", chrome.runtime.lastError.message)
-          }
         })
       })
       .catch((err: unknown) => {
-        const error = err instanceof Error ? err.message : String(err)
-        const reply: OutboundMessage = {
+        relayToBackground({
           type:     "action_result",
           actionId: msg.actionId,
           taskId:   msg.taskId,
           success:  false,
-          error,
-        }
-        chrome.runtime.sendMessage(reply, () => {
-          if (chrome.runtime.lastError) {
-            console.error("[compass] action_result send failed:", chrome.runtime.lastError.message)
-          }
+          error:    err instanceof Error ? err.message : String(err),
         })
       })
     return false
@@ -49,29 +65,11 @@ chrome.runtime.onMessage.addListener((msg: ServerMessage) => {
   if (msg.type === "screenshot_request") {
     captureScreenshot()
       .then((dataUrl) => {
-        const reply: OutboundMessage = {
-          type:      "screenshot_response",
-          requestId: msg.requestId,
-          dataUrl,
-        }
-        chrome.runtime.sendMessage(reply, () => {
-          if (chrome.runtime.lastError) {
-            console.error("[compass] screenshot_response send failed:", chrome.runtime.lastError.message)
-          }
-        })
+        relayToBackground({ type: "screenshot_response", requestId: msg.requestId, dataUrl })
       })
       .catch((err: unknown) => {
-        const reply: OutboundMessage = {
-          type:      "screenshot_response",
-          requestId: msg.requestId,
-          dataUrl:   "",
-        }
-        chrome.runtime.sendMessage(reply, () => {
-          if (chrome.runtime.lastError) {
-            console.error("[compass] screenshot_response (error) send failed:", chrome.runtime.lastError.message)
-          }
-        })
         console.error("[compass] captureScreenshot failed for screenshot_request:", err)
+        relayToBackground({ type: "screenshot_response", requestId: msg.requestId, dataUrl: "" })
       })
     return false
   }
@@ -98,11 +96,22 @@ async function handleAction(
   }
 }
 
+function syntheticClick(el: HTMLElement): void {
+  const rect = el.getBoundingClientRect()
+  const cx = rect.left + rect.width / 2
+  const cy = rect.top + rect.height / 2
+  const opts: MouseEventInit = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window }
+  el.dispatchEvent(new MouseEvent("mousedown", opts))
+  el.dispatchEvent(new MouseEvent("mouseup", opts))
+  el.dispatchEvent(new MouseEvent("click", opts))
+}
+
 async function executeIntent(intent: WebIntent, registry: Map<number, Element>): Promise<void> {
   if (intent.action === "click") {
     const el = registry.get(intent.element_id)
     if (!el) throw new Error(`Element ID ${intent.element_id} not found`)
-    ;(el as HTMLElement).click()
+    console.log(`[compass] click element_id=${intent.element_id} tag=${el.tagName} text="${(el as HTMLElement).innerText?.slice(0, 80)}" outerHTML="${el.outerHTML.slice(0, 200)}"`)
+    syntheticClick(el as HTMLElement)
     return
   }
 
@@ -184,7 +193,7 @@ async function executeIntent(intent: WebIntent, registry: Map<number, Element>):
 
 // ─── DOM snapshot ─────────────────────────────────────────────────────────────
 
-const INTERACTABLE_SELECTOR = [
+const SEMANTIC_SELECTOR = [
   "button",
   "input",
   "select",
@@ -194,6 +203,11 @@ const INTERACTABLE_SELECTOR = [
   "[role=link]",
   "[role=menuitem]",
   "[role=option]",
+  "[role=treeitem]",
+  "[role=tab]",
+  "[role=checkbox]",
+  "[role=radio]",
+  "[role=switch]",
 ].join(", ")
 
 function isVisible(el: Element): boolean {
@@ -210,21 +224,52 @@ function isScrollableContainer(el: Element): boolean {
   )
 }
 
+// Returns true for elements that behave like clickable controls even without
+// semantic HTML — e.g. Dojo/Ext.js divs with onclick, or cursor:pointer leaves.
+function isClickableNonSemantic(el: Element): boolean {
+  // Must have some visible text to be useful to the agent
+  const text = (el as HTMLElement).innerText?.trim()
+  if (!text || text.length === 0) return false
+
+  // Has an explicit onclick attribute
+  if (el.hasAttribute("onclick")) return true
+
+  // Computed cursor is pointer AND it's a leaf node (no interactive children)
+  // — avoids capturing giant wrapper divs that happen to have pointer cursor
+  const style = window.getComputedStyle(el as HTMLElement)
+  if (style.cursor === "pointer") {
+    const hasInteractiveChild = el.querySelector(SEMANTIC_SELECTOR) !== null
+    if (!hasInteractiveChild) return true
+  }
+
+  return false
+}
+
 function collectInteractables(): { registry: Map<number, Element>; inverseRegistry: Map<Element, number> } {
   const registry = new Map<number, Element>()
   const inverseRegistry = new Map<Element, number>()
   const seen = new Set<Element>()
   let id = 1
 
-  document.querySelectorAll<Element>(INTERACTABLE_SELECTOR).forEach((el) => {
+  // Pass 1: semantic elements
+  document.querySelectorAll<Element>(SEMANTIC_SELECTOR).forEach((el) => {
     seen.add(el)
     registry.set(id, el)
     inverseRegistry.set(el, id)
     id++
   })
 
+  // Pass 2: non-semantic clickables (onclick attrs, cursor:pointer leaves)
   document.querySelectorAll<Element>("*").forEach((el) => {
-    if (isScrollableContainer(el) && !seen.has(el)) {
+    if (seen.has(el)) return
+    if (isClickableNonSemantic(el)) {
+      seen.add(el)
+      registry.set(id, el)
+      inverseRegistry.set(el, id)
+      id++
+      return
+    }
+    if (isScrollableContainer(el)) {
       seen.add(el)
       registry.set(id, el)
       inverseRegistry.set(el, id)
@@ -236,15 +281,36 @@ function collectInteractables(): { registry: Map<number, Element>; inverseRegist
 }
 
 function linearizeGrid(table: Element, inverseRegistry: Map<Element, number>): string {
-  const rows = Array.from(table.querySelectorAll("tr, [role=row]"))
-  if (rows.length === 0) return ""
+  const allRows = Array.from(table.querySelectorAll("tr, [role=row]"))
+  if (allRows.length === 0) return ""
+
+  // Separate header rows (th cells or role=columnheader) from data rows
+  const headerRows = allRows.filter((r) =>
+    r.querySelector("th, [role=columnheader]") !== null,
+  )
+  const dataRows = allRows.filter((r) =>
+    r.querySelector("th, [role=columnheader]") === null,
+  )
+
+  // Only include data rows that are visible in the viewport
+  const visibleDataRows = dataRows.filter((row) => {
+    const rect = (row as HTMLElement).getBoundingClientRect()
+    return rect.bottom > 0 && rect.top < window.innerHeight && rect.height > 0
+  })
+
+  const hiddenCount = dataRows.length - visibleDataRows.length
+  const rowsToRender = headerRows.length > 0
+    ? [...headerRows, ...visibleDataRows]
+    : visibleDataRows
+
+  if (rowsToRender.length === 0) return ""
 
   const lines: string[] = []
 
-  rows.forEach((row, rowIndex) => {
+  rowsToRender.forEach((row, rowIndex) => {
     const cells = Array.from(row.querySelectorAll("th, td, [role=gridcell], [role=columnheader]"))
     const cellTexts = cells.map((cell) => {
-      const interactable = cell.querySelector<Element>(INTERACTABLE_SELECTOR)
+      const interactable = cell.querySelector<Element>(SEMANTIC_SELECTOR)
       if (interactable) {
         const eid = inverseRegistry.get(interactable)
         if (eid !== undefined) {
@@ -255,13 +321,15 @@ function linearizeGrid(table: Element, inverseRegistry: Map<Element, number>): s
       return cell.textContent?.trim().replace(/\s+/g, " ") ?? ""
     })
 
+    lines.push("| " + cellTexts.join(" | ") + " |")
     if (rowIndex === 0) {
-      lines.push("| " + cellTexts.join(" | ") + " |")
       lines.push("|" + cellTexts.map(() => "---").join("|") + "|")
-    } else {
-      lines.push("| " + cellTexts.join(" | ") + " |")
     }
   })
+
+  if (hiddenCount > 0) {
+    lines.push(`(${hiddenCount} more rows off-screen — scroll to reveal)`)
+  }
 
   return lines.join("\n")
 }
@@ -276,7 +344,7 @@ function collectDisplayBlocks(gridSelector: string): Set<Element> {
   document.querySelectorAll<Element>("div, span, p, li, dd, dt").forEach((el) => {
     if (!isVisible(el)) return
     if (isInsideGrid(el, gridSelector)) return
-    if (el.querySelector(INTERACTABLE_SELECTOR) !== null) return
+    if (el.querySelector(SEMANTIC_SELECTOR) !== null) return
     const text = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
     if (text.length < 3) return
     candidates.push(el)
@@ -309,14 +377,17 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
 
   const gridSelector = "table, [role=grid], [role=table]"
 
-  const visibleLines:   string[] = []
-  const offscreenLines: string[] = []
-  const gridSections:   string[] = []
+  const visibleLines: string[] = []
+  const gridSections: string[] = []
   const displayBlocks   = collectDisplayBlocks(gridSelector)
   const visibleEntries: Array<{ el: Element; line: string }> = []
 
-  // Process grids first
-  document.querySelectorAll<Element>(gridSelector).forEach((grid) => {
+  // Process grids — outermost only to avoid one section per row in flat-table layouts
+  const allGrids = Array.from(document.querySelectorAll<Element>(gridSelector))
+  const outerGrids = allGrids.filter(
+    (g) => !allGrids.some((other) => other !== g && other.contains(g)),
+  )
+  outerGrids.forEach((grid) => {
     const gridMd = linearizeGrid(grid, inverseRegistry)
     if (gridMd) {
       const heading = grid.querySelector("caption, [role=caption]")?.textContent?.trim()
@@ -325,25 +396,36 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
     }
   })
 
-  // Stage display blocks for DOM-ordered emit
+  // Stage display blocks for DOM-ordered emit — skip invisible/zero-size containers
+  // and truncate long text so the element map stays within token limits.
   for (const el of displayBlocks) {
-    const text = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
+    const rect = (el as HTMLElement).getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) continue
+    const style = window.getComputedStyle(el as HTMLElement)
+    if (style.visibility === "hidden" || style.display === "none" || style.opacity === "0") continue
+    const full = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
+    const text = full.length > 120 ? full.slice(0, 120) + "…" : full
     visibleEntries.push({ el, line: `[TEXT]: "${text}"` })
   }
 
-  // Process interactables
+  // Process interactables — visible only, agent scrolls to reveal off-screen content
   for (const [eid, el] of registry) {
-    // Skip elements inside a grid (already captured above)
     if (isInsideGrid(el, gridSelector)) continue
+    if (!isVisible(el)) continue
 
     const tag = el.tagName.toLowerCase()
-    const text =
+    const ariaLabelledBy = (el as HTMLElement).getAttribute("aria-labelledby")
+    const labelledByText = ariaLabelledBy
+      ? document.getElementById(ariaLabelledBy)?.textContent?.trim() ?? ""
+      : ""
+    const rawText =
+      labelledByText ||
       el.textContent?.trim().replace(/\s+/g, " ") ||
       (el as HTMLInputElement).placeholder ||
       (el as HTMLElement).getAttribute("aria-label") ||
       ""
+    const text = rawText.length > 80 ? rawText.slice(0, 80) + "…" : rawText
     const role = el.getAttribute("role") ?? ""
-    const visible = isVisible(el)
 
     let label: string
     if (tag === "input") {
@@ -363,11 +445,7 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
       label = `[${eid}] ${tag}: "${text}"`
     }
 
-    if (visible) {
-      visibleEntries.push({ el, line: label })
-    } else {
-      offscreenLines.push(label + " [Off-screen]")
-    }
+    visibleEntries.push({ el, line: label })
   }
 
   // Emit visible entries in DOM order
@@ -396,40 +474,21 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
     semanticVisible.push(`[${tag.toUpperCase()}]: "${text}"`)
   })
 
-  // Add off-screen headings as directional anchors
-  const offscreenHeadings: string[] = []
-  document.querySelectorAll<Element>("h1, h2, h3").forEach((el) => {
-    if (isVisible(el)) return
-    const text = el.textContent?.trim().replace(/\s+/g, " ") ?? ""
-    if (!text) return
-    offscreenHeadings.push(`[${el.tagName}]: "${text}" [Off-screen]`)
-  })
-
   if (semanticVisible.length > 0 || visibleLines.length > 0) {
-    sections.push("=== VISIBLE VIEWPORT ===\n" + [...semanticVisible, ...visibleLines].join("\n"))
+    sections.push([...semanticVisible, ...visibleLines].join("\n"))
   }
 
   if (gridSections.length > 0) {
     sections.push(gridSections.join("\n\n"))
   }
 
-  const belowFold = [...offscreenHeadings, ...offscreenLines]
-  if (belowFold.length > 0) {
-    sections.push("=== BELOW THE FOLD (OFF-SCREEN) ===\n" + belowFold.join("\n"))
-  }
-
   return sections.join("\n\n")
 }
 
 async function captureScreenshot(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type: "capture_screenshot_request" }, (response: { dataUrl: string } | undefined) => {
-      if (chrome.runtime.lastError || !response) {
-        reject(new Error(chrome.runtime.lastError?.message ?? "No screenshot response"))
-        return
-      }
-      resizeScreenshot(response.dataUrl).then(resolve).catch(reject)
-    })
+  return new Promise((resolve, _reject) => {
+    screenshotResolve = (dataUrl) => resizeScreenshot(dataUrl).then(resolve).catch(() => resolve(""))
+    relayPort.postMessage({ type: "capture_screenshot_request" })
   })
 }
 
@@ -461,6 +520,7 @@ async function handleSnapshotRequest(taskId: string, taskType: DomTaskType): Pro
   elementRegistry.set(taskId, registry)
 
   const elementMap = buildHybridTree(registry, inverseRegistry)
+  console.log(`[compass] snapshot taskId=${taskId} elementCount=${registry.size}`)
   const screenshot = await captureScreenshot()
 
   const msg: OutboundMessage = {
@@ -470,9 +530,5 @@ async function handleSnapshotRequest(taskId: string, taskType: DomTaskType): Pro
     screenshot,
     elementMap,
   }
-  chrome.runtime.sendMessage(msg, () => {
-    if (chrome.runtime.lastError) {
-      console.error("[compass] dom_snapshot send failed:", chrome.runtime.lastError.message)
-    }
-  })
+  relayToBackground(msg)
 }

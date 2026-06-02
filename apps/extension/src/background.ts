@@ -23,7 +23,8 @@ function connect() {
   ws = new WebSocket(WS_URL)
 
   ws.onopen = () => {
-    // sessionId is assigned by the server via session_init — wait for it
+    attempt = 0
+    console.log("[compass] WS connected — waiting for mic to start session")
   }
 
   ws.onmessage = (event: MessageEvent<string>) => {
@@ -37,8 +38,7 @@ function connect() {
 
     if (msg.type === "session_init") {
       sessionId = msg.sessionId
-      attempt = 0
-      console.log(`[compass] connected, sessionId: ${sessionId}`)
+      console.log(`[compass] session started, sessionId: ${sessionId}`)
       return
     }
 
@@ -74,34 +74,59 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(connect, delayMs)
 }
 
-// Handle screenshot capture requests from content scripts
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type !== "capture_screenshot_request") return false
-  const windowId = sender.tab?.windowId
-  chrome.tabs.captureVisibleTab(
-    windowId,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    { format: "webp", quality: 75 } as any,
-    (dataUrl: string) => { sendResponse({ dataUrl }) }
-  )
-  return true // keep channel open for async response
-})
-
-// Relay outbound messages from content scripts to the gateway
-chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage | { type: "capture_screenshot_request" }) => {
-  if (message.type === "capture_screenshot_request") return false
-  if (!ws || ws.readyState !== WebSocket.OPEN || !sessionId) {
-    console.warn("[compass] dropping message — not connected", message)
+function sendRaw(message: OutboundExtensionMessage) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.warn("[compass] dropping message — WS not open", (message as { type: string }).type)
     return
   }
-  const outbound: ExtensionMessage = {
-    ...message,
-    sessionId
-  } as ExtensionMessage
+  // session_start / session_end have no sessionId — send as-is
+  const msgType = (message as { type: string }).type
+  if (msgType === "session_start" || msgType === "session_end") {
+    ws.send(JSON.stringify(message))
+    return
+  }
+  // All other messages require an active session
+  if (!sessionId) {
+    console.warn("[compass] dropping message — no active session", (message as { type: string }).type)
+    return
+  }
+  const outbound: ExtensionMessage = { ...message, sessionId } as ExtensionMessage
   ws.send(JSON.stringify(outbound))
+}
+
+// Persistent port from content script — keeps the service worker alive so async
+// operations (captureVisibleTab, WebSocket sends) always complete.
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "compass-relay") return
+
+  port.onMessage.addListener((message: OutboundExtensionMessage | { type: "capture_screenshot_request" }) => {
+    if (message.type === "capture_screenshot_request") {
+      const windowId = port.sender?.tab?.windowId ?? chrome.windows.WINDOW_ID_CURRENT
+      chrome.tabs.captureVisibleTab(
+        windowId,
+        { format: "jpeg", quality: 75 },
+        (dataUrl: string) => {
+          if (chrome.runtime.lastError || !dataUrl) {
+            console.error("[compass] captureVisibleTab failed:", chrome.runtime.lastError?.message)
+            port.postMessage({ type: "capture_screenshot_response", dataUrl: "" })
+            return
+          }
+          port.postMessage({ type: "capture_screenshot_response", dataUrl })
+        }
+      )
+      return
+    }
+
+    sendRaw(message as OutboundExtensionMessage)
+  })
 })
 
-// Call connect() at module scope so it runs every time the service worker is instantiated
+// Relay fire-and-forget messages from pill.tsx (audio_chunk, session_start, session_end, user_action_result).
+chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage, _sender, _sendResponse) => {
+  sendRaw(message)
+  return false
+})
+
 connect()
 
 chrome.runtime.onInstalled.addListener(() => {})

@@ -30,11 +30,11 @@
   },
   "manifest": {
     "host_permissions": [
-      "https://*/*",
-      "http://*/*"
+      "<all_urls>"
     ],
     "permissions": [
       "tabs",
+      "activeTab",
       "microphone"
     ]
   }
