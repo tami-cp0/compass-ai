@@ -1,4 +1,8 @@
 export type ExtensionMessage = {
+    type: "session_start";
+} | {
+    type: "session_end";
+} | {
     type: "audio_chunk";
     sessionId: string;
     data: string;
@@ -23,6 +27,11 @@ export type ExtensionMessage = {
     actionId: string;
     taskId: string;
     confirmed: boolean;
+} | {
+    type: "screenshot_response";
+    sessionId: string;
+    requestId: string;
+    dataUrl: string;
 };
 export type ServerMessage = {
     type: "audio_chunk";
@@ -56,6 +65,10 @@ export type ServerMessage = {
 } | {
     type: "session_init";
     sessionId: string;
+} | {
+    type: "screenshot_request";
+    sessionId: string;
+    requestId: string;
 };
 export type DomTaskType = "click" | "form" | "read" | "structure";
 export type WebIntent = {

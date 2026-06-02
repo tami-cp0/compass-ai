@@ -1,5 +1,7 @@
 // Extension → Gateway → Node
 export type ExtensionMessage =
+  | { type: "session_start" }
+  | { type: "session_end" }
   | { type: "audio_chunk"; sessionId: string; data: string; mimeType: "audio/pcm" }
   | { type: "dom_snapshot"; sessionId: string; taskId: string; taskType: DomTaskType; screenshot: string; elementMap: string }
   | { type: "action_result"; sessionId: string; actionId: string; taskId: string; success: boolean; error?: string }
