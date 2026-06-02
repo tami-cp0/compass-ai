@@ -18,10 +18,10 @@ class StepRecord {
 
 class WebAgentStep {
   reasoning string @description("One sentence max.")
-  needs_element_map bool @description("True if you need the element map to proceed. Set this when next_action requires a click, type, or highlight but no element map was provided. False for scroll, verify, or when element map is already present.")
+  needs_element_map bool @description("True if you need the element map to proceed. Set this when next_action requires a click, type, or highlight but no element map was provided. False for scroll, verify, or when element map is already present. When true, set next_action=null.")
   next_action WebAction? @description("Null if needs_element_map is true, is_complete is true, or is_failed is true.")
-  is_complete bool @description("True ONLY when you are looking at a screenshot taken AFTER your last action and the task is visually confirmed done. Never true on the same turn you set next_action.")
-  is_failed bool
+  is_complete bool @description("True ONLY when you can visually confirm the task is already done or your last action completed it. Never true on the same turn you set next_action.")
+  is_failed bool @description("True if the task is impossible, stuck, or the same action has failed twice.")
 }
 
 
