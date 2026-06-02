@@ -3,12 +3,12 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/src/core/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch src/core/index.ts",
     "build": "baml-cli generate --from baml_src && tsc",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/index.js"
+    "start": "node dist/src/core/index.js"
   },
   "dependencies": {
     "@boundaryml/baml": "^0.75.0",

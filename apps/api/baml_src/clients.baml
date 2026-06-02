@@ -4,18 +4,11 @@ generator my_client {
   version "0.75.0"
 }
 
-client<llm> GPT4o {
+client<llm> GPT54Mini {
   provider openai
   options {
-    model "gpt-4o"
+    model "gpt-5.4-mini"
     api_key env.OPENAI_API_KEY
-  }
-}
-
-client<llm> GeminiFlash {
-  provider google-ai
-  options {
-    model "gemini-1.5-flash"
-    api_key env.GOOGLE_API_KEY
+    max_completion_tokens 4096
   }
 }
