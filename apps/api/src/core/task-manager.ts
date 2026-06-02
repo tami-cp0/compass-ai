@@ -384,7 +384,7 @@ export class TaskManager {
 	}
 
 	private _runAutomation(task: Task): void {
-		const { taskId, name, description } = task;
+		const { taskId, name } = task;
 
 		this._runAutomationLoop(task, []).catch((err: unknown) => {
 			this.pendingSnapshots.delete(taskId);
