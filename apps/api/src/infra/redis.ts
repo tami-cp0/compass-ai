@@ -13,7 +13,7 @@ export const redis = new Redis(process.env.REDIS_URL, {
 })
 
 redis.on("connect", () => logger.info("Redis connected"))
-redis.on("error", (err: unknown) => logger.error("Redis error", { error: String(err) }))
+redis.on("error", (err: unknown) => logger.error("Redis error", { error: err instanceof Error ? err : new Error(String(err)) }))
 
 export async function connectRedis(): Promise<void> {
   await redis.connect()

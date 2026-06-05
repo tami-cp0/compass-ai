@@ -2,20 +2,55 @@ import { App, DISABLED } from 'uWebSockets.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ExtensionMessage, ServerMessage } from '@compass-ai/types';
 import { createSession, deleteSession, sessionCount } from './session-store.js';
-import { logger } from '../infra/logger.js';
+import { logger, sessionLogger } from '../infra/logger.js';
 import { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
 import { getConversationHistory } from '../infra/redis.js';
 import { TaskManager } from './task-manager.js';
 
-const PORT = Number(process.env.PORT ?? 8787);
+if (!process.env.PORT) {
+	throw new Error('PORT environment variable is not set');
+}
+if (!process.env.NODE_ENV) {
+	throw new Error('NODE_ENV environment variable is not set');
+}
+
+const IS_DEV = process.env.NODE_ENV === 'development';
+
+if (!IS_DEV && !process.env.ALLOWED_ORIGINS) {
+	throw new Error('ALLOWED_ORIGINS environment variable is required when NODE_ENV is not development');
+}
+
+const PORT = Number(process.env.PORT);
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
+	.split(',')
+	.map((o) => o.trim())
+	.filter(Boolean);
 
 interface ApiSession {
 	sessionId: string;
 	gemini: GeminiLiveSession;
 	taskManager: TaskManager;
+	startedAt: number;
 }
 
 const apiSessions = new Map<string, ApiSession>();
+
+function emitSessionSummary(sessionId: string, apiSession: ApiSession, closeCode?: number, closeReason?: string): void {
+	const log = sessionLogger(sessionId);
+	const m = apiSession.taskManager.metrics;
+	log.info('Session summary', {
+		durationMs: Date.now() - apiSession.startedAt,
+		toolCalls: apiSession.gemini.toolCallCount,
+		researchDispatched: m.researchDispatched,
+		researchCompleted: m.researchCompleted,
+		researchFailed: m.researchFailed,
+		automationDispatched: m.automationDispatched,
+		automationCompleted: m.automationCompleted,
+		automationFailed: m.automationFailed,
+		automationSteps: m.automationSteps,
+		...(closeCode !== undefined ? { closeCode, closeReason } : {}),
+	});
+}
 
 export function startServer(): void {
 	const app = App();
@@ -25,9 +60,24 @@ export function startServer(): void {
 		maxPayloadLength: 16 * 1024 * 1024,
 		idleTimeout: 120,
 
-		open(ws) {
-			ws.getUserData().sessionId = null;
-			logger.info('WS connection opened — waiting for session_start');
+		upgrade(res, req, context) {
+			const origin = req.getHeader('origin');
+			if (!IS_DEV && !ALLOWED_ORIGINS.includes(origin)) {
+				logger.warn('WS upgrade rejected', { origin });
+				res.writeStatus('403 Forbidden').end();
+				return;
+			}
+			res.upgrade(
+				{ sessionId: null },
+				req.getHeader('sec-websocket-key'),
+				req.getHeader('sec-websocket-protocol'),
+				req.getHeader('sec-websocket-extensions'),
+				context
+			);
+		},
+
+		open() {
+			logger.debug('WS connection opened');
 		},
 
 		async message(ws, rawMessage) {
@@ -44,16 +94,16 @@ export function startServer(): void {
 			const send = (m: ServerMessage) => ws.send(JSON.stringify(m));
 
 			if (msg.type === 'session_start') {
-				// Tear down any existing session on this WS first (re-start)
 				const existing = ws.getUserData().sessionId;
 				if (existing) {
 					const prev = apiSessions.get(existing);
 					if (prev) {
+						emitSessionSummary(existing, prev);
 						await prev.gemini.close();
 						apiSessions.delete(existing);
 					}
 					deleteSession(existing);
-					logger.info('Previous session torn down for re-start', { sessionId: existing });
+					logger.debug('Previous session torn down for re-start', { sessionId: existing });
 				}
 
 				const sessionId = uuidv4();
@@ -63,13 +113,13 @@ export function startServer(): void {
 				const session = createSession(sessionId, send);
 				const gemini = new GeminiLiveSession(sessionId, send, history);
 				const taskManager = new TaskManager(session, gemini);
-				apiSessions.set(sessionId, { sessionId, gemini, taskManager });
+				apiSessions.set(sessionId, { sessionId, gemini, taskManager, startedAt: Date.now() });
 
 				gemini.onDispatchResearch = (name, desc) =>
 					taskManager.dispatchResearch(name, desc);
 				gemini.onDispatchAutomation = (name, desc) =>
 					taskManager.dispatchAutomation(name, desc);
-				gemini.onCancelTask = (taskId) => taskManager.cancel(taskId);
+				gemini.onCancelTask = (name) => taskManager.cancel(name);
 
 				await gemini.connect();
 
@@ -79,7 +129,7 @@ export function startServer(): void {
 						sessionId,
 					} satisfies ServerMessage)
 				);
-				logger.info('Session started', { sessionId, total: sessionCount() });
+				logger.info('Session started', { sessionId, activeSessions: sessionCount() });
 				return;
 			}
 
@@ -88,12 +138,13 @@ export function startServer(): void {
 				if (!sessionId) return;
 				const apiSession = apiSessions.get(sessionId);
 				if (apiSession) {
+					emitSessionSummary(sessionId, apiSession);
 					await apiSession.gemini.close();
 					apiSessions.delete(sessionId);
 				}
 				deleteSession(sessionId);
 				ws.getUserData().sessionId = null;
-				logger.info('Session ended by client', { sessionId, total: sessionCount() });
+				logger.info('Session ended by client', { sessionId, activeSessions: sessionCount() });
 				return;
 			}
 
@@ -142,17 +193,18 @@ export function startServer(): void {
 			if (sessionId) {
 				const apiSession = apiSessions.get(sessionId);
 				if (apiSession) {
+					emitSessionSummary(sessionId, apiSession, code);
 					await apiSession.gemini.close();
 					apiSessions.delete(sessionId);
 				}
 				deleteSession(sessionId);
-				logger.info('WS closed — session torn down', {
+				logger.info('WS closed', {
 					sessionId,
 					code,
-					total: sessionCount(),
+					activeSessions: sessionCount(),
 				});
 			} else {
-				logger.info('WS closed — no active session', { code });
+				logger.debug('WS closed — no active session', { code });
 			}
 		},
 	});
@@ -161,7 +213,7 @@ export function startServer(): void {
 		if (token) {
 			logger.info('Server listening', { port: PORT });
 		} else {
-			logger.error('Failed to start server', { port: PORT });
+			logger.fatal('Failed to start server', { port: PORT });
 			process.exit(1);
 		}
 	});
