@@ -81,33 +81,29 @@ const CompassIcon = ({ className }: { className?: string }) => (
 </svg>
 )
 
-// ── Frequency bars driven by mic input ───────────────────────────────────────
-function FrequencyBars({ active }: { active: boolean }) {
+// ── Frequency bars driven by mic OR Gemini output ────────────────────────────
+type BarsMode = "mic" | "speaker" | "idle"
+
+function FrequencyBars({ mode }: { mode: BarsMode }) {
   const barsRef   = useRef<(HTMLDivElement | null)[]>([])
   const rafRef    = useRef<number>()
   const streamRef = useRef<MediaStream>()
+  const ctxRef    = useRef<AudioContext>()
 
   useEffect(() => {
-    if (!active) {
+    const stop = () => {
       cancelAnimationFrame(rafRef.current!)
       barsRef.current.forEach(b => { if (b) b.style.height = "4px" })
       streamRef.current?.getTracks().forEach(t => t.stop())
-      return
+      streamRef.current = undefined
+      ctxRef.current?.close().catch(() => {})
+      ctxRef.current = undefined
     }
 
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-      streamRef.current = stream
-      const ctx      = new AudioContext()
-      const source   = ctx.createMediaStreamSource(stream)
-      const analyser = ctx.createAnalyser()
-      analyser.fftSize = 1024
-      source.connect(analyser)
-
+    const animate = (analyser: AnalyserNode) => {
       const data = new Uint8Array(analyser.frequencyBinCount)
       const smoothed = new Array(barsRef.current.length).fill(4)
-      // speech sits roughly in 80Hz–3000Hz — map bars only to that range
-      const sampleRate = ctx.sampleRate
-      const nyquist = sampleRate / 2
+      const nyquist = analyser.context.sampleRate / 2
       const startBin = Math.floor((80 / nyquist) * analyser.frequencyBinCount)
       const endBin   = Math.floor((3000 / nyquist) * analyser.frequencyBinCount)
       const range = endBin - startBin
@@ -127,17 +123,34 @@ function FrequencyBars({ active }: { active: boolean }) {
         rafRef.current = requestAnimationFrame(tick)
       }
       tick()
+    }
+
+    if (mode === "idle") { stop(); return }
+
+    if (mode === "speaker") {
+      const analyser = player.getAnalyser()
+      if (analyser) animate(analyser)
+      return stop
+    }
+
+    // mic
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      streamRef.current = stream
+      const ctx      = new AudioContext()
+      ctxRef.current = ctx
+      const source   = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 1024
+      source.connect(analyser)
+      animate(analyser)
     }).catch(console.error)
 
-    return () => {
-      cancelAnimationFrame(rafRef.current!)
-      streamRef.current?.getTracks().forEach(t => t.stop())
-    }
-  }, [active])
+    return stop
+  }, [mode])
 
   return (
     <div className="flex items-center gap-[3px] h-8 relative z-10">
-      {Array.from({ length: 10 }).map((_, i) => (
+      {Array.from({ length: 14 }).map((_, i) => (
         <div
           key={i}
           ref={el => { barsRef.current[i] = el }}
@@ -152,10 +165,342 @@ function FrequencyBars({ active }: { active: boolean }) {
 // ── Pill ─────────────────────────────────────────────────────────────────────
 const Pill = () => {
   const [active, setActive]         = useState(false)
+  const [showActive, setShowActive] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [isAutomationRunning, setIsAutomationRunning] = useState(false)
   const [confirmation, setConfirmation] = useState<PendingConfirmation | null>(null)
   const captureRef = useRef<PcmCapture | null>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const introRef = useRef<{ target: number; value: number; lastT: number }>({ target: 0, value: 0, lastT: 0 })
+  const startBorderRef = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    const STYLE_ID   = "compass-viewport-border-style"
+    const OVERLAY_ID = "compass-viewport-border"
+
+    let cleanup: (() => void) | null = null
+    try {
+    const style = document.createElement("style")
+    style.id = STYLE_ID
+    style.textContent = `
+      #${OVERLAY_ID} {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 2147483646;
+        opacity: 0;
+        animation: compass-fade-in 700ms ease-out forwards;
+      }
+      #${OVERLAY_ID} canvas { display: block; width: 100%; height: 100%; }
+      @keyframes compass-fade-in { to { opacity: 1; } }
+    `
+    document.head.appendChild(style)
+
+    const overlay = document.createElement("div")
+    overlay.id = OVERLAY_ID
+
+    const canvas = document.createElement("canvas")
+    overlay.appendChild(canvas)
+    document.documentElement.appendChild(overlay)
+
+    const gl = canvas.getContext("webgl", {
+      premultipliedAlpha: true,
+      alpha: true,
+      antialias: true,
+      preserveDrawingBuffer: false
+    })
+
+    if (!gl) {
+      // No WebGL — bail silently
+      return () => { overlay.remove(); style.remove() }
+    }
+
+    const vertSrc = `
+      attribute vec2 a_pos;
+      varying vec2 v_uv;
+      void main() {
+        v_uv = a_pos * 0.5 + 0.5;
+        gl_Position = vec4(a_pos, 0.0, 1.0);
+      }
+    `
+
+    // Fragment shader: rounded-rect SDF border + flowing simplex noise + gemini gradient
+    const fragSrc = `
+      precision highp float;
+      varying vec2 v_uv;
+      uniform vec2  u_res;
+      uniform float u_time;
+      uniform float u_dpr;
+      uniform float u_intro;
+
+      // ---- simplex noise (Ashima) ----
+      vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
+      vec2 mod289(vec2 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
+      vec3 permute(vec3 x){ return mod289(((x*34.0)+1.0)*x); }
+      float snoise(vec2 v){
+        const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+                           -0.577350269189626, 0.024390243902439);
+        vec2 i  = floor(v + dot(v, C.yy));
+        vec2 x0 = v -   i + dot(i, C.xx);
+        vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+        vec4 x12 = x0.xyxy + C.xxzz;
+        x12.xy -= i1;
+        i = mod289(i);
+        vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0))
+                                 + i.x + vec3(0.0, i1.x, 1.0));
+        vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+        m = m*m; m = m*m;
+        vec3 x = 2.0 * fract(p * C.www) - 1.0;
+        vec3 h = abs(x) - 0.5;
+        vec3 ox = floor(x + 0.5);
+        vec3 a0 = x - ox;
+        m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+        vec3 g;
+        g.x  = a0.x  * x0.x  + h.x  * x0.y;
+        g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+        return 130.0 * dot(m, g);
+      }
+      float fbm(vec2 p){
+        float v = 0.0; float a = 0.5;
+        for (int i = 0; i < 4; i++) {
+          v += a * snoise(p);
+          p *= 2.02; a *= 0.5;
+        }
+        return v;
+      }
+
+      // Signed distance to a rounded rectangle centered at origin
+      float sdRoundRect(vec2 p, vec2 b, float r){
+        vec2 q = abs(p) - b + r;
+        return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+      }
+
+      // Signed distance to a sharp-cornered rectangle centered at origin
+      float sdRect(vec2 p, vec2 b){
+        vec2 q = abs(p) - b;
+        return min(max(q.x, q.y), 0.0) + length(max(q, 0.0));
+      }
+
+      // Teal / ice cyan / soft periwinkle / soft mint palette
+      vec3 gemini(float t){
+        t = fract(t);
+        vec3 c0 = vec3(0.078, 0.722, 0.651); // #14B8A6 teal (anchor)
+        vec3 c1 = vec3(0.404, 0.910, 0.976); // #67E8F9 ice cyan
+        vec3 c2 = vec3(0.647, 0.706, 0.988); // #A5B4FC soft periwinkle
+        vec3 c3 = vec3(0.525, 0.937, 0.675); // #86EFAC soft mint
+        float seg = t * 4.0;
+        int idx = int(floor(seg));
+        float f = fract(seg);
+        f = smoothstep(0.0, 1.0, f);
+        vec3 a, b;
+        if      (idx == 0) { a = c0; b = c1; }
+        else if (idx == 1) { a = c1; b = c2; }
+        else if (idx == 2) { a = c2; b = c3; }
+        else               { a = c3; b = c0; }
+        return mix(a, b, f);
+      }
+
+      void main(){
+        vec2 frag = v_uv * u_res;
+        vec2 center = u_res * 0.5;
+        vec2 p = frag - center;
+
+        // ── Layer 1: sharp rectangle, flush with viewport, 90° corners ──
+        vec2 outerHalf = u_res * 0.5;
+        float dOuter   = sdRect(p, outerHalf);   // 0 at edge, negative inside
+
+        // Perimeter coordinate s in [0,1] — drives flow + gradient
+        vec2 q = p / max(outerHalf, vec2(1.0));
+        float ang = atan(q.y, q.x);
+        float s = fract(ang / 6.2831853 + 0.25);
+
+        // Flow field traveling along the border — multiple scales for visible waviness
+        float flow1 = fbm(vec2(s * 8.0  - u_time * 0.25, u_time * 0.12));
+        float flow2 = fbm(vec2(s * 18.0 + u_time * 0.45, u_time * 0.08 + 4.7));
+        float flow3 = fbm(vec2(s * 32.0 - u_time * 0.65, u_time * 0.15 + 9.1));
+        // Combined wave: big swells (flow1) + medium ripples (flow2) + fine chop (flow3)
+        float wave = flow1 * 0.65 + flow2 * 0.28 + flow3 * 0.12;
+        float waveNorm = 0.5 + 0.5 * wave; // 0..1
+
+        // Single continuous falloff from the rectangle edge inward.
+        // The wave modulates the reach per perimeter position so the fade
+        // itself looks fluid, with no stacked layers and no visible seam.
+        float outerAA = 1.0 * u_dpr;
+        float outerMask = smoothstep(outerAA, -outerAA, dOuter);
+
+        float depth = -dOuter;
+
+        // Intro/outro: band swells from zero thickness to full reach, evenly around the perimeter.
+        float swell = u_intro;
+
+        float fullReach = mix(16.0, 48.0, waveNorm) * u_dpr + flow3 * 2.0 * u_dpr;
+        float reach     = fullReach * swell;
+
+        float falloff = (reach > 0.0) ? (1.0 - smoothstep(0.0, reach, depth)) : 0.0;
+        falloff = pow(falloff, 1.4);
+
+        float band = outerMask * falloff;
+
+        // Color walks the perimeter, drifts in time
+        float hue = s + u_time * 0.045 + flow1 * 0.06;
+        vec3 col = gemini(hue);
+
+        // Subtle brightness pulse
+        float pulse = 0.85 + 0.30 * (0.5 + 0.5 * sin(u_time * 1.4 + s * 12.566));
+        col *= pulse;
+
+        float alpha = clamp(band * swell, 0.0, 1.0);
+        gl_FragColor = vec4(col * alpha, alpha);
+      }
+    `
+
+    const compile = (type: number, src: string) => {
+      const sh = gl.createShader(type)!
+      gl.shaderSource(sh, src)
+      gl.compileShader(sh)
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        console.error("[compass] shader compile failed:", gl.getShaderInfoLog(sh))
+        gl.deleteShader(sh)
+        return null
+      }
+      return sh
+    }
+
+    const vs = compile(gl.VERTEX_SHADER, vertSrc)
+    const fs = compile(gl.FRAGMENT_SHADER, fragSrc)
+    if (!vs || !fs) {
+      return () => { overlay.remove(); style.remove() }
+    }
+
+    const prog = gl.createProgram()!
+    gl.attachShader(prog, vs)
+    gl.attachShader(prog, fs)
+    gl.linkProgram(prog)
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.error("[compass] link failed:", gl.getProgramInfoLog(prog))
+      return () => { overlay.remove(); style.remove() }
+    }
+    gl.useProgram(prog)
+
+    // Fullscreen quad
+    const buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1,   1, -1,  -1,  1,
+      -1,  1,   1, -1,   1,  1,
+    ]), gl.STATIC_DRAW)
+    const aPos = gl.getAttribLocation(prog, "a_pos")
+    gl.enableVertexAttribArray(aPos)
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0)
+
+    const uRes   = gl.getUniformLocation(prog, "u_res")
+    const uTime  = gl.getUniformLocation(prog, "u_time")
+    const uDpr   = gl.getUniformLocation(prog, "u_dpr")
+    const uIntro = gl.getUniformLocation(prog, "u_intro")
+
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA) // premultiplied alpha
+
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1
+      const w = Math.floor(window.innerWidth  * dpr)
+      const h = Math.floor(window.innerHeight * dpr)
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w
+        canvas.height = h
+      }
+      gl.viewport(0, 0, w, h)
+      gl.uniform2f(uRes, w, h)
+      gl.uniform1f(uDpr, dpr)
+    }
+    resize()
+    window.addEventListener("resize", resize)
+
+    let raf = 0
+    let running = false
+    let startTime = performance.now()
+    let lastT = startTime
+    const introState = introRef.current
+
+    // ease-out cubic
+    const ease = (x: number) => 1.0 - Math.pow(1.0 - x, 3.0)
+    const INTRO_DURATION_MS = 900
+
+    const clearCanvas = () => {
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+    }
+
+    const frame = () => {
+      const now = performance.now()
+      const t = (now - startTime) / 1000
+      gl.uniform1f(uTime, t)
+
+      const dt = now - lastT
+      lastT = now
+      const step = dt / INTRO_DURATION_MS
+      const dir = Math.sign(introState.target - introState.value)
+      if (dir !== 0) {
+        introState.value = Math.max(0, Math.min(1, introState.value + step * dir))
+      }
+      gl.uniform1f(uIntro, ease(introState.value))
+
+      clearCanvas()
+      gl.drawArrays(gl.TRIANGLES, 0, 6)
+
+      // Stop the loop entirely once we've fully settled into the off state.
+      if (introState.target === 0 && introState.value <= 0.0001) {
+        introState.value = 0
+        running = false
+        // Final clear so nothing lingers on the canvas
+        clearCanvas()
+        return
+      }
+      raf = requestAnimationFrame(frame)
+    }
+
+    const startLoop = () => {
+      if (running) return
+      running = true
+      // Reset the clock so the wave field always starts from the same phase
+      // on activation. Without this, u_time keeps advancing between sessions
+      // and the wave "jumps" mid-intro.
+      startTime = performance.now()
+      lastT = startTime
+      raf = requestAnimationFrame(frame)
+    }
+    startBorderRef.current = startLoop
+
+    // Idle on mount — no GPU work until user activates
+    clearCanvas()
+
+    cleanup = () => {
+      cancelAnimationFrame(raf)
+      startBorderRef.current = null
+      window.removeEventListener("resize", resize)
+      gl.deleteBuffer(buf)
+      gl.deleteProgram(prog)
+      gl.deleteShader(vs)
+      gl.deleteShader(fs)
+      overlay.remove()
+      style.remove()
+    }
+    } catch (err) {
+      console.error("[compass] viewport border init failed:", err)
+      document.getElementById(OVERLAY_ID)?.remove()
+      document.getElementById(STYLE_ID)?.remove()
+    }
+
+    return () => { cleanup?.() }
+  }, [])
+
+  useEffect(() => {
+    if (!active) setShowActive(false)
+    introRef.current.target = active ? 1 : 0
+    // Wake the WebGL loop so it can play either the intro or the outro;
+    // it self-stops once the outro settles back to 0.
+    startBorderRef.current?.()
+  }, [active])
 
   useEffect(() => {
     const onMessage = (msg: ServerMessage) => {
@@ -204,36 +549,45 @@ const Pill = () => {
   }, [])
 
   const toggle = useCallback(() => {
+    const btn = btnRef.current
+    if (btn) {
+      btn.classList.remove("bouncing")
+      void btn.offsetWidth
+      btn.classList.add("bouncing")
+      btn.addEventListener("animationend", () => {
+        btn.classList.remove("bouncing")
+      }, { once: true })
+    }
     if (active) stopSession()
     else startSession().catch(console.error)
   }, [active, startSession, stopSession])
 
   return (
-    <div className="fixed top-6 flex justify-center left-[50%]">
+    <div className="fixed top-6 left-1/2 -translate-x-1/2">
       <button
-        className={`button relative flex items-center px-4 py-1 cursor-pointer bg-transparent transition-all duration-300 rounded-full origin-center ${active ? "active" : ""}`}
+        ref={btnRef}
+        className={`button relative flex items-center justify-center h-10 px-4 py-1 cursor-pointer bg-transparent rounded-full overflow-hidden origin-center transition-[width] duration-300 ease-in-out ${active ? "active w-[170px]" : "w-[130px]"}`}
         onClick={toggle}
+        onTransitionEnd={(e) => {
+          if (e.propertyName === "width" && active) setShowActive(true)
+        }}
         aria-label={active ? "Stop session" : "Start session"}
       >
-        {/* spinning border */}
-        <div className={`dots_border absolute overflow-hidden -translate-x-1/2 -translate-y-1/2 top-1/2 left-1/2 bg-transparent rounded-full -z-10 ${active ? "opacity-0" : ""}`} />
 
-        {active ? (
-          /* ── ACTIVE: frequency bars + speaking/listening label ── */
-          <>
-            <FrequencyBars active={!isSpeaking} />
-            <span className="relative z-10 text-white/90 text-sm ml-2">
+          {showActive ? (
+          <div className="flex items-center gap-2 fade-in">
+            <FrequencyBars mode={active ? (isSpeaking ? "speaker" : "mic") : "idle"} />
+            <span className="relative z-10 text-white/90 text-sm whitespace-nowrap">
               {isSpeaking ? "speaking" : "listening"}
             </span>
-          </>
-        ) : (
-          /* ── IDLE: compass svg + shine text ── */
-          <>
-            <div className="h-8 w-7" />
+          </div>
+        ) : !active ? (
+          <div className="flex items-center">
+            <div className="h-10 w-7 shrink-0" />
             <CompassIcon className="size-10 absolute left-0 z-10" />
-            <span className="text_button relative z-10">Compass</span>
-          </>
-        )}
+            <span className="text_button relative z-10 whitespace-nowrap">Compass</span>
+          </div>
+        ) : null}
       </button>
     </div>
   )
