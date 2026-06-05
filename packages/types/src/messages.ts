@@ -20,8 +20,32 @@ export type ServerMessage =
 
 export type DomTaskType = "click" | "form" | "read" | "structure"
 
+export interface WebAction {
+  action: 'click' | 'type' | 'scroll' | 'highlight'
+  element_id: number | null
+  value: string | null
+  direction: 'up' | 'down' | 'left' | 'right' | null
+  amount: number | null
+  text_snippet: string | null
+  isCritical: boolean
+  description: string
+}
+
+export interface WebAgentStep {
+  reasoning: string
+  next_action: WebAction | null
+  is_complete: boolean
+  is_failed: boolean
+}
+
+export interface StepRecord {
+  step_number: number
+  action_description: string
+  outcome: 'succeeded' | 'failed'
+}
+
 export type WebIntent =
   | { action: "click"; element_id: number }
   | { action: "type"; element_id: number; value: string }
-  | { action: "scroll"; element_id: number | null; direction: "up" | "down"; amount: number }
+  | { action: "scroll"; element_id: number | null; direction: "up" | "down" | "left" | "right"; amount: number }
   | { action: "highlight"; element_id: number; text_snippet: string }
