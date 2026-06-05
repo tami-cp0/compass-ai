@@ -1,7 +1,8 @@
 import type { LiveServerMessage, Session } from '@google/genai';
 import type { ServerMessage } from '@compass-ai/types';
-import { logger } from '../../infra/logger.js';
+import { sessionLogger, type Logger } from '../../infra/logger.js';
 import { appendTurn, type ConversationHistory } from '../../infra/redis.js';
+import type { TokenTracker } from '../../infra/token-tracker.js';
 import { ai, LIVE_CONFIG, SYSTEM_PROMPT } from './live-config.js';
 
 export class GeminiLiveSession {
@@ -10,6 +11,9 @@ export class GeminiLiveSession {
 	private history: ConversationHistory;
 	private session: Session | null = null;
 	private outputTranscriptBuffer = '';
+	private log: Logger;
+	private tokens: TokenTracker | null = null;
+	toolCallCount = 0;
 
 	// Tool call handlers — wired by TaskManager in Phase 6
 	onDispatchResearch:
@@ -18,7 +22,7 @@ export class GeminiLiveSession {
 	onDispatchAutomation:
 		| ((name: string, description: string) => Record<string, unknown>)
 		| null = null;
-	onCancelTask: ((taskId: string) => Record<string, unknown>) | null = null;
+	onCancelTask: ((name: string) => Record<string, unknown>) | null = null;
 	onRequestScreenshot: (() => Promise<string>) | null = null;
 
 	constructor(
@@ -29,6 +33,7 @@ export class GeminiLiveSession {
 		this.sessionId = sessionId;
 		this.send = send;
 		this.history = history;
+		this.log = sessionLogger(sessionId);
 	}
 
 	async connect(): Promise<void> {
@@ -47,38 +52,34 @@ export class GeminiLiveSession {
 				: '';
 
 		this.session = await ai.live.connect({
-			model: 'gemini-3.1-flash-live-preview',
+			model: process.env.GEMINI_LIVE_MODEL!,
 			config: {
 				systemInstruction: SYSTEM_PROMPT + historyContext,
 				...LIVE_CONFIG,
 			},
 			callbacks: {
-				onopen: () =>
-					logger.info('Gemini Live connected', {
-						sessionId: this.sessionId,
-					}),
-				onclose: (e) =>
-					logger.info('Gemini Live closed', {
-						sessionId: this.sessionId,
-						code: (e as { code?: number; reason?: string })?.code,
-						reason: (e as { code?: number; reason?: string })
-							?.reason,
-					}),
+				onopen: () => this.log.debug('Gemini Live connected'),
+				onclose: (e) => {
+					const ev = e as { code?: number; reason?: string };
+					this.log.debug('Gemini Live closed', { code: ev?.code, reason: ev?.reason });
+				},
 				onerror: (e) =>
-					logger.error('Gemini Live error', {
-						sessionId: this.sessionId,
-						error: String(e),
+					this.log.error('Gemini Live error', {
+						error: e instanceof Error ? e : new Error(String(e)),
 					}),
 				onmessage: (msg: LiveServerMessage) => {
 					this.handleMessage(msg).catch((err: unknown) =>
-						logger.error('handleMessage error', {
-							sessionId: this.sessionId,
-							error: String(err),
+						this.log.error('handleMessage error', {
+							error: err instanceof Error ? err : new Error(String(err)),
 						})
 					);
 				},
 			},
 		});
+	}
+
+	setTokenTracker(tracker: TokenTracker): void {
+		this.tokens = tracker;
 	}
 
 	sendAudio(base64Pcm: string): void {
@@ -102,6 +103,17 @@ export class GeminiLiveSession {
 	}
 
 	private async handleMessage(msg: LiveServerMessage): Promise<void> {
+		// Token usage — emitted on most server messages
+		const um = msg.usageMetadata;
+		if (um && this.tokens) {
+			this.tokens.recordLive({
+				inputTokens: um.promptTokenCount ?? 0,
+				outputTokens: um.responseTokenCount ?? 0,
+				totalTokens: um.totalTokenCount ?? 0,
+				cachedTokens: um.cachedContentTokenCount,
+			});
+		}
+
 		// Audio output — stream back to extension
 		const audioPart = msg.serverContent?.modelTurn?.parts?.find((p) =>
 			p.inlineData?.mimeType?.startsWith('audio/')
@@ -122,9 +134,9 @@ export class GeminiLiveSession {
 				role: 'user',
 				content: inputTranscript.text,
 			}).catch((err: unknown) =>
-				logger.error('Redis appendTurn failed', {
-					sessionId: this.sessionId,
-					error: String(err),
+				this.log.error('Redis appendTurn failed', {
+					turn: 'user',
+					error: err instanceof Error ? err : new Error(String(err)),
 				})
 			);
 		}
@@ -141,9 +153,9 @@ export class GeminiLiveSession {
 			this.outputTranscriptBuffer = '';
 			appendTurn(this.sessionId, { role: 'model', content: text }).catch(
 				(err: unknown) =>
-					logger.error('Redis appendTurn failed', {
-						sessionId: this.sessionId,
-						error: String(err),
+					this.log.error('Redis appendTurn failed', {
+						turn: 'model',
+						error: err instanceof Error ? err : new Error(String(err)),
 					})
 			);
 		}
@@ -175,10 +187,10 @@ export class GeminiLiveSession {
 					name: call.name ?? '',
 					response: screenshotResult,
 				});
-				logger.info('Tool call handled', {
-					sessionId: this.sessionId,
+				this.toolCallCount++;
+				this.log.debug('Tool call handled', {
 					tool: call.name,
-					result: screenshotResult,
+					status: screenshotResult.status,
 				});
 				// screenshot is always the only tool in a batch — flush the
 				// function response first (protocol requires it before clientContent),
@@ -237,7 +249,7 @@ export class GeminiLiveSession {
 						args.description
 					);
 				} else if (call.name === 'cancel_task' && this.onCancelTask) {
-					result = this.onCancelTask(args.taskId);
+					result = this.onCancelTask(args.name);
 				} else {
 					result = {
 						status: 'acknowledged',
@@ -251,10 +263,10 @@ export class GeminiLiveSession {
 				name: call.name ?? '',
 				response: result,
 			});
-			logger.info('Tool call handled', {
-				sessionId: this.sessionId,
+			this.toolCallCount++;
+			this.log.debug('Tool call handled', {
 				tool: call.name,
-				result,
+				status: result.status,
 			});
 		}
 

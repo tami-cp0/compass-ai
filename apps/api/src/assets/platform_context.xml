@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<platform_awareness>
+  <overview>
+    <name>Atlass (CitiTrader)</name>
+    <description>CitiTrader client trading portal by Atlass Portfolios for NGX market transactions, account management, mandates, and portfolios.</description>
+  </overview>
+  <available_pages>
+    <page>
+      <id>login</id>
+      <name>Login Page</name>
+      <purpose>The entry point and authentication page for Atlass Portfolios (CitiTrader). Allows users to log in with their credentials or request a password reset.</purpose>
+      <key_components>CitiTrader - Atlass Portfolios Limited Header, Customer Account Form, Copyright Footer</key_components>
+    </page>
+    <page>
+      <id>reset_password</id>
+      <name>Reset Password Page</name>
+      <purpose>Allows users to request a password reset by providing their Login ID and their registered email address.</purpose>
+      <key_components>CitiTrader - Atlass Portfolios Limited Header, Reset Password Form, Copyright Footer</key_components>
+    </page>
+    <page>
+      <id>dashboard</id>
+      <name>Dashboard</name>
+      <purpose>Main dashboard containing several key overview cards including Accounts summary, Portfolio distribution, Orders summary, Trade executions, Watchlist (Favourites), and quick links menu. This is the default home tab.</purpose>
+      <key_components>Accounts Card, Portfolio Card, Orders Card, Executions Card, Favourites Card, Menu Quick Links</key_components>
+    </page>
+    <page>
+      <id>my_reports</id>
+      <name>My Reports</name>
+      <purpose>Enables generating and running various financial and account reports, including Statement of Account and Contract Notes.</purpose>
+      <key_components>Report Parameters Form</key_components>
+    </page>
+    <page>
+      <id>list_accounts</id>
+      <name>List Accounts</name>
+      <purpose>Displays a grid of all client trading accounts, showing account numbers, holder names, balances, and main account details.</purpose>
+      <key_components>Accounts Data Grid</key_components>
+    </page>
+    <page>
+      <id>certificates</id>
+      <name>Certificates</name>
+      <purpose>Allows clients to view and track physical or dematerialized stock certificates associated with their accounts.</purpose>
+      <key_components>Symbol, Units, Cert. Date, Cert. No, Cert. A/C No, Status, Sent, Returned, Entered</key_components>
+    </page>
+    <page>
+      <id>portfolio</id>
+      <name>Portfolio</name>
+      <purpose>Displays the client&apos;s current investment holdings, including unit costs, break-even prices, asset costs, current market value, realizable value, and unrealized gain/loss percentage.</purpose>
+      <key_components>Symbol, Description, Ref Price, Unit Cost, Break-Even Price, Asset Cost, Mkt Value, Net Realizable Value, Gain/Loss (%), Units, Held, Bought, Sold, Total / Net</key_components>
+    </page>
+    <page>
+      <id>withdrawal_request</id>
+      <name>Withdrawal Request</name>
+      <purpose>Opens a modal dialog that enables the user to request funds withdrawal from their trading account, displaying the available balance.</purpose>
+      <key_components>Funds Withdrawal Request Dialog</key_components>
+    </page>
+    <page>
+      <id>new_mandate</id>
+      <name>New Mandate</name>
+      <purpose>Page to initiate and submit a new e-mandate registration for direct dividend payments.</purpose>
+      <key_components>Mandate Registration Details</key_components>
+    </page>
+    <page>
+      <id>manage_mandates</id>
+      <name>Manage Mandates</name>
+      <purpose>Allows clients to search, view, create, or delete active trading mandates.</purpose>
+      <key_components>Symbol, Account No, Side, Qty, Price, Consideration (Value), Date, Private, Status, Message, Order Type, Entered, Exchange, Mkt. Seg.</key_components>
+    </page>
+    <page>
+      <id>buy_orders</id>
+      <name>Buy Orders</name>
+      <purpose>Displays the user&apos;s active and historical stock buy orders, including quantity, price, filled status.</purpose>
+      <key_components>Buy Orders Grid</key_components>
+    </page>
+    <page>
+      <id>sell_orders</id>
+      <name>Sell Orders</name>
+      <purpose>Displays the user&apos;s active and historical stock sell orders, showing quantity, price, filled status, proceeds.</purpose>
+      <key_components>Sell Orders Grid</key_components>
+    </page>
+    <page>
+      <id>import_mandates</id>
+      <name>Import Mandates</name>
+      <purpose>Allows clients to view and process imported mandates that are queued for execution.</purpose>
+      <key_components>Imported Mandates Grid</key_components>
+    </page>
+    <page>
+      <id>order_history</id>
+      <name>Order History</name>
+      <purpose>Allows clients to search and view historical orders across sessions, symbols, dates, accounts, and order details.</purpose>
+      <key_components>Entered
+	
+Side
+	
+Symbol, Entered, Side, Symbol, Order Type
+	
+Price
+	
+Qty
+	
+Filled
+	
+Open
+	
+Last Qty
+	
+Last Price
+	
+Avg Price
+	
+Status
+	
+Message
+	
+Entered By, Order Type, Price, Qty, Filled, Open, Last Qty, Last Price, Avg Price, Status, Message, Entered By, Session, Mkt. Seg., Account No, On/From</key_components>
+    </page>
+    <page>
+      <id>summary</id>
+      <name>Summary</name>
+      <purpose>Displays trade execution summaries aggregated by market segment and transaction side, including volume and value statistics.</purpose>
+      <key_components>Market Segment, Side, Volume, Value, Session, Mkt. Seg., Account No, Symbol, On/From, To</key_components>
+    </page>
+    <page>
+      <id>details</id>
+      <name>Details</name>
+      <purpose>Displays individual trade execution details, showing execution date, side, account number, volume, price, value, and order creator.</purpose>
+      <key_components>Symbol, Date, Modified, Side, Account No, Qty, (Avg.) Price, Value, Entered By, Session, Mkt. Seg., On/From, To</key_components>
+    </page>
+    <page>
+      <id>market_view</id>
+      <name>Market View</name>
+      <purpose>The central trading cockpit of CitiTrader, housing real-time stock lists, bid/offer order books, and live trade streams. This is the main view where all stock market and security listings live, and where detailed order books can be found.</purpose>
+      <key_components>Top Control Bar, Securities Grid Table, Bottom Panels - Market Tab, Bid Order Book Panel, Offer Order Book Panel, Trades Panel</key_components>
+      <sub_features>
+    <page>
+      <id>market_view_my_orders</id>
+      <name>My Orders Tab View</name>
+      <purpose>Displays the logged-in user&apos;s pending, executed, or active orders directly within the Market View interface.</purpose>
+      <key_components>My Orders Grid</key_components>
+    </page>
+      </sub_features>
+    </page>
+    <page>
+      <id>trades</id>
+      <name>Trades</name>
+      <purpose>Provides a tabular view of recent stock market transactions on the NGX exchange, including prices, quantities, and transaction times. NOTE: Real-time streaming of trades is not active on this view, so users must manually click the Refresh button to query the latest executed trades.</purpose>
+      <key_components>Market Trades Grid</key_components>
+    </page>
+    <page>
+      <id>statistics</id>
+      <name>Statistics</name>
+      <purpose>Displays summary statistical data of the market for the trading session, featuring a 2x2 grid of key tables: Gainers, Losers, Most Traded by Value, and Most Traded by Volume.</purpose>
+      <key_components>Gainers Table, Losers Table, Most Traded by Value Table, Most Traded by Volume Table</key_components>
+    </page>
+    <page>
+      <id>manage_watchlist</id>
+      <name>Manage Watchlist</name>
+      <purpose>Allows users to construct, view, and organize custom watchlists of stock tickers. Shows ticker symbols, names, current reference prices, daily high/low price limits, and entry timestamps.</purpose>
+      <key_components>Watchlist Table Grid</key_components>
+    </page>
+    <page>
+      <id>price_volume_chart</id>
+      <name>Price/Volume Chart</name>
+      <purpose>Renders interactive price (OHLC) and volume charts for a selected security symbol within a specified month and year.</purpose>
+      <key_components>Chart Filters Bar, Historical OHLC Grid</key_components>
+    </page>
+    <page>
+      <id>securities</id>
+      <name>Securities</name>
+      <purpose>Lists all listed securities on the NGX exchange, including equities and debt instruments, with reference prices, price limits, issue dates, coupon rates, and other profile details.</purpose>
+      <key_components>Securities Master Grid</key_components>
+    </page>
+    <page>
+      <id>reports</id>
+      <name>Reports</name>
+      <purpose>Enables users to run and export specific market reports, such as the Daily Price List &amp; Market Summary, by configuring filters for exchange, segment, symbol, and date.</purpose>
+      <key_components>Report Configuration Form</key_components>
+    </page>
+    <page>
+      <id>news</id>
+      <name>News</name>
+      <purpose>Displays real-time market and company news. (Note: This page was not accessible in the current session and may be restricted by user role or pending implementation).</purpose>
+    </page>
+    <page>
+      <id>quick_help</id>
+      <name>Quick Help</name>
+      <purpose>Displays quick help notes, user guides, and reference tips for navigating and executing trades on the CitiTrader platform.</purpose>
+      <key_components>Help Topics</key_components>
+    </page>
+    <page>
+      <id>service_request</id>
+      <name>Service Request</name>
+      <purpose>Allows users to submit support tickets, service requests, or transaction inquiries to customer support.</purpose>
+      <key_components>Support Ticket Form</key_components>
+    </page>
+    <page>
+      <id>disclaimer</id>
+      <name>Disclaimer</name>
+      <purpose>Displays the legal disclaimer, liability limitations, data accuracy notices, and terms of service guidelines for using the CitiTrader application.</purpose>
+      <key_components>Legal Disclaimer Text</key_components>
+    </page>
+  </available_pages>
+  <vector_store_guidance>
+    <instruction>The vector store contains an Element Registry formatted as Relational JSON. Use the file_search tool to query it.</instruction>
+    <instruction>When you need to find specific interactive elements (buttons, inputs) or sections for a page, search using the specific page_id.</instruction>
+    <instruction>The registry separates 'page_overview' objects from 'interactive_element' objects. They are relationally linked by 'page_id'. If you retrieve an element, you can assume it belongs to the page specified by its page_id.</instruction>
+  </vector_store_guidance>
+</platform_awareness>

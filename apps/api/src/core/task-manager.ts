@@ -2,20 +2,43 @@ import { v4 as uuidv4 } from 'uuid';
 import type {
 	ExtensionMessage,
 	SessionState,
+	StepRecord,
 	Task,
+	WebAction,
 	WebIntent,
 } from '@compass-ai/types';
-import type { StepRecord, WebAction } from '../../baml_client/types.js';
 import type { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
 import { getConversationHistory } from '../infra/redis.js';
 import { runResearchAgent } from '../agents/research/research-agent.js';
-import { dataUrlToImage, webAgentNextStep } from '../agents/web/web-agent.js';
-import { logger } from '../infra/logger.js';
+import { webAgentNextStep } from '../agents/web/web-agent.js';
+import { sessionLogger, type Logger } from '../infra/logger.js';
+import { TokenTracker } from '../infra/token-tracker.js';
+
+export interface SessionMetrics {
+	researchDispatched: number;
+	researchCompleted: number;
+	researchFailed: number;
+	automationDispatched: number;
+	automationCompleted: number;
+	automationFailed: number;
+	automationSteps: number;
+}
 
 export class TaskManager {
 	private session: SessionState;
 	private gemini: GeminiLiveSession;
+	private log!: Logger;
+	readonly tokens: TokenTracker;
 	private abortControllers: Map<string, AbortController> = new Map();
+	readonly metrics: SessionMetrics = {
+		researchDispatched: 0,
+		researchCompleted: 0,
+		researchFailed: 0,
+		automationDispatched: 0,
+		automationCompleted: 0,
+		automationFailed: 0,
+		automationSteps: 0,
+	};
 	private pendingSnapshots = new Map<
 		string,
 		(
@@ -42,6 +65,9 @@ export class TaskManager {
 	constructor(session: SessionState, gemini: GeminiLiveSession) {
 		this.session = session;
 		this.gemini = gemini;
+		this.log = sessionLogger(session.sessionId);
+		this.tokens = new TokenTracker(session.sessionId);
+		gemini.setTokenTracker(this.tokens);
 		gemini.onRequestScreenshot = () => this._requestScreenshot();
 	}
 
@@ -53,7 +79,7 @@ export class TaskManager {
 			(s) => s === null
 		);
 		if (slotIndex === -1) {
-			return { status: 'rejected', reason: 'research_slots_full' };
+			return { status: 'rejected', reason: 'research_slots_full', free_research_slots_remaining: 0 };
 		}
 
 		const taskId = uuidv4();
@@ -70,9 +96,16 @@ export class TaskManager {
 		const controller = new AbortController();
 		this.abortControllers.set(taskId, controller);
 
+		this.metrics.researchDispatched++;
+		this.log.info('Research dispatched', { taskId, name });
+
 		this._runResearch(task, slotIndex, controller.signal);
 
-		return { taskId, status: 'dispatched' };
+		return {
+			taskId,
+			status: 'dispatched',
+			free_research_slots_remaining: this.session.researchSlots.filter(s => s === null).length - 1,
+		};
 	}
 
 	private _runResearch(
@@ -96,17 +129,15 @@ export class TaskManager {
 					.join('\n');
 				return runResearchAgent(description, context, signal);
 			})
-			.then((result) => {
+			.then(({ result, usage }) => {
 				if (this.session.cancelledTasks.has(taskId)) {
-					logger.info(
-						'Research result discarded — task was cancelled',
-						{ taskId }
-					);
+					this.log.debug('Research result discarded — task was cancelled', { taskId });
 					return;
 				}
 				(this.session.researchSlots as Array<Task | null>)[slotIndex] =
 					null;
 				this.abortControllers.delete(taskId);
+				this.tokens.recordResearch(taskId, name, usage);
 				const body = JSON.stringify(result);
 				const MAX = 10_000;
 				const trimmed =
@@ -115,33 +146,33 @@ export class TaskManager {
 						: body;
 				const payload = `[research_result: ${name}]\n${trimmed}`;
 				this.gemini.injectContent(payload);
-				logger.info('Research result injected', {
+				this.metrics.researchCompleted++;
+				this.log.info('Research completed', {
 					taskId,
 					name,
+					durationMs: Date.now() - task.startedAt,
 					byteLength: body.length,
 					truncated: body.length > MAX,
 				});
 			})
 			.catch((err: unknown) => {
 				if (this.session.cancelledTasks.has(taskId)) {
-					logger.info(
-						'Research error discarded — task was cancelled',
-						{ taskId }
-					);
+					this.log.debug('Research error discarded — task was cancelled', { taskId });
 					return;
 				}
 				(this.session.researchSlots as Array<Task | null>)[slotIndex] =
 					null;
 				this.abortControllers.delete(taskId);
-				const message =
-					err instanceof Error ? err.message : String(err);
+				const error = err instanceof Error ? err : new Error(String(err));
 				this.gemini.injectContent(
-					`[research error] Task "${name}" failed: ${message}`
+					`[research error] Task "${name}" failed: ${error.message}`
 				);
-				logger.error('Research task failed', {
+				this.metrics.researchFailed++;
+				this.log.error('Research failed', {
 					taskId,
 					name,
-					error: message,
+					durationMs: Date.now() - task.startedAt,
+					error,
 				});
 			});
 	}
@@ -151,7 +182,7 @@ export class TaskManager {
 		description: string
 	): Record<string, unknown> {
 		if (this.session.automationSlot !== null) {
-			return { status: 'rejected', reason: 'automation_slot_full' };
+			return { status: 'rejected', reason: 'automation_slot_full', free_automation_slots_remaining: 0 };
 		}
 
 		const taskId = uuidv4();
@@ -168,9 +199,12 @@ export class TaskManager {
 		const controller = new AbortController();
 		this.abortControllers.set(taskId, controller);
 
+		this.metrics.automationDispatched++;
+		this.log.info('Automation dispatched', { taskId, name });
+
 		this._runAutomation(task);
 
-		return { taskId, status: 'dispatched' };
+		return { taskId, status: 'dispatched', free_automation_slots_remaining: 0 };
 	}
 
 	handleDomSnapshot(
@@ -286,13 +320,13 @@ export class TaskManager {
 		}
 		if (
 			action.action === 'scroll' &&
-			(action.direction === 'up' || action.direction === 'down') &&
+			(action.direction === 'up' || action.direction === 'down' || action.direction === 'left' || action.direction === 'right') &&
 			action.amount != null
 		) {
 			return {
 				action: 'scroll',
 				element_id: action.element_id ?? null,
-				direction: action.direction,
+				direction: action.direction as 'up' | 'down' | 'left' | 'right',
 				amount: action.amount,
 			};
 		}
@@ -383,28 +417,37 @@ export class TaskManager {
 		return { success: result.success, error: result.error };
 	}
 
+	private _formatStepSummary(history: StepRecord[]): string {
+		if (history.length === 0) return '';
+		const recent = history.slice(-3);
+		return '\nLast steps: ' + recent.map(s => `[${s.step_number}] ${s.action_description} → ${s.outcome}`).join(' | ');
+	}
+
+	private _injectAutomationContext(message: string, history: StepRecord[] = []): void {
+		const stepSummary = this._formatStepSummary(history);
+		this.gemini.injectContent(`${message}${stepSummary}\nautomation_slot_freed: true`);
+	}
+
 	private _runAutomation(task: Task): void {
 		const { taskId, name } = task;
 
 		this._runAutomationLoop(task, []).catch((err: unknown) => {
 			this.pendingSnapshots.delete(taskId);
 			if (this.session.cancelledTasks.has(taskId)) {
-				logger.info('Automation error discarded — task was cancelled', {
-					taskId,
-				});
+				this.log.debug('Automation error discarded — task was cancelled', { taskId });
 				return;
 			}
 			this.session.automationSlot = null;
 			this.abortControllers.delete(taskId);
-			const message = err instanceof Error ? err.message : String(err);
-			this._sendAutomationEnd(taskId, 'error', message);
-			this.gemini.injectContent(
-				`[automation context] Task "${name}" failed: ${message}`
-			);
-			logger.error('Automation task failed', {
+			const error = err instanceof Error ? err : new Error(String(err));
+			this._sendAutomationEnd(taskId, 'error', error.message);
+			this._injectAutomationContext(`[automation context] Task "${name}" failed: ${error.message}`);
+			this.metrics.automationFailed++;
+			this.log.error('Automation failed', {
 				taskId,
 				name,
-				error: message,
+				durationMs: Date.now() - task.startedAt,
+				error,
 			});
 		});
 	}
@@ -421,91 +464,42 @@ export class TaskManager {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
 				this._sendAutomationEnd(taskId, 'cancelled');
-				logger.info('Automation cancelled', { taskId, step: history.length });
+				this.log.info('Automation cancelled', { taskId, name, durationMs: Date.now() - task.startedAt, steps: history.length });
 				return;
 			}
 
-			// Wait for page to settle before capturing (skip on first step)
-			if (history.length > 0) {
-				await new Promise((r) => setTimeout(r, 800));
-			}
-
-			// Phase 1: screenshot only — cheap, no elementMap
-			const screenshotUrl = await this._requestScreenshot();
+			// Single round trip: snapshot returns screenshot + elementMap together
+			const snapshot = await this._requestSnapshot(taskId);
 
 			if (this.session.cancelledTasks.has(taskId)) {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
 				this._sendAutomationEnd(taskId, 'cancelled');
-				logger.info('Automation cancelled after screenshot', { taskId, step: history.length });
+				this.log.info('Automation cancelled', { taskId, name, durationMs: Date.now() - task.startedAt, steps: history.length, after: 'snapshot' });
 				return;
 			}
 
-			if (!screenshotUrl) {
+			if (!snapshot) {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
-				const errorMsg = `Screenshot timed out at step ${history.length + 1}`;
+				const errorMsg = `DOM snapshot timed out at step ${history.length + 1}`;
 				this._sendAutomationEnd(taskId, 'error', errorMsg);
-				this.gemini.injectContent(`[automation context] Task "${name}" failed: ${errorMsg}`);
-				logger.error('Automation screenshot timeout', { taskId, name, step: history.length + 1 });
+				this._injectAutomationContext(`[automation context] Task "${name}" failed: ${errorMsg}`, history);
+				this.metrics.automationFailed++;
+				this.log.error('Automation failed', { taskId, name, reason: 'snapshot_timeout', step: history.length + 1, durationMs: Date.now() - task.startedAt });
 				return;
 			}
 
-			const recentHistory = history.slice(-3);
-
-			// Phase 2: recon call — screenshot only, no elementMap
-			let step = await webAgentNextStep(description, null, screenshotUrl, recentHistory);
+			const recentHistory = history.slice(-10);
+			const { step, usage } = await webAgentNextStep(description, snapshot.elementMap, snapshot.screenshot, recentHistory);
+			this.tokens.recordAutomationStep(taskId, name, history.length + 1, usage);
 
 			if (this.session.cancelledTasks.has(taskId)) {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
 				this._sendAutomationEnd(taskId, 'cancelled');
-				logger.info('Automation cancelled after recon step', { taskId, step: history.length + 1 });
+				this.log.info('Automation cancelled', { taskId, name, durationMs: Date.now() - task.startedAt, steps: history.length, after: 'agent_step' });
 				return;
-			}
-
-			// Phase 3: if agent needs elementMap, fetch it and call again
-			if (step.needs_element_map) {
-				const snapshot = await this._requestSnapshot(taskId);
-
-				if (this.session.cancelledTasks.has(taskId)) {
-					this.session.automationSlot = null;
-					this.abortControllers.delete(taskId);
-					this._sendAutomationEnd(taskId, 'cancelled');
-					logger.info('Automation cancelled while fetching elementMap', { taskId, step: history.length + 1 });
-					return;
-				}
-
-				if (!snapshot) {
-					this.session.automationSlot = null;
-					this.abortControllers.delete(taskId);
-					const errorMsg = `DOM snapshot timed out at step ${history.length + 1}`;
-					this._sendAutomationEnd(taskId, 'error', errorMsg);
-					this.gemini.injectContent(`[automation context] Task "${name}" failed: ${errorMsg}`);
-					logger.error('Automation snapshot timeout', { taskId, name, step: history.length + 1 });
-					return;
-				}
-
-				// Act call — same screenshot + real elementMap
-				step = await webAgentNextStep(description, snapshot.elementMap, screenshotUrl, recentHistory);
-
-				if (this.session.cancelledTasks.has(taskId)) {
-					this.session.automationSlot = null;
-					this.abortControllers.delete(taskId);
-					this._sendAutomationEnd(taskId, 'cancelled');
-					logger.info('Automation cancelled after act step', { taskId, step: history.length + 1 });
-					return;
-				}
-
-				if (step.needs_element_map) {
-					this.session.automationSlot = null;
-					this.abortControllers.delete(taskId);
-					const errorMsg = `Agent requested elementMap again after it was already provided (step ${history.length + 1})`;
-					this._sendAutomationEnd(taskId, 'error', errorMsg);
-					this.gemini.injectContent(`[automation context] Task "${name}" failed: ${errorMsg}`);
-					logger.error('Agent needs_element_map after elementMap provided', { taskId, name, step: history.length + 1 });
-					return;
-				}
 			}
 
 			if (step.is_failed) {
@@ -513,10 +507,9 @@ export class TaskManager {
 				this.abortControllers.delete(taskId);
 				const errorMsg = step.reasoning;
 				this._sendAutomationEnd(taskId, 'error', errorMsg);
-				this.gemini.injectContent(
-					`[automation context] Task "${name}" could not be completed after ${history.length} step(s): ${errorMsg}`
-				);
-				logger.error('Automation agent declared failure', { taskId, name, step: history.length + 1, reasoning: errorMsg });
+				this._injectAutomationContext(`[automation context] Task "${name}" could not be completed after ${history.length} step(s): ${errorMsg}`, history);
+				this.metrics.automationFailed++;
+				this.log.error('Automation failed', { taskId, name, reason: 'agent_declared_failure', step: history.length + 1, reasoning: errorMsg, durationMs: Date.now() - task.startedAt });
 				return;
 			}
 
@@ -524,10 +517,9 @@ export class TaskManager {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
 				this._sendAutomationEnd(taskId, 'complete');
-				this.gemini.injectContent(
-					`[automation context] Task "${name}" completed in ${history.length} step(s).`
-				);
-				logger.info('Automation completed', { taskId, name, steps: history.length });
+				this._injectAutomationContext(`[automation context] Task "${name}" completed in ${history.length} step(s).`);
+				this.metrics.automationCompleted++;
+				this.log.info('Automation completed', { taskId, name, steps: history.length, durationMs: Date.now() - task.startedAt });
 				return;
 			}
 
@@ -535,8 +527,9 @@ export class TaskManager {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
 				this._sendAutomationEnd(taskId, 'error', 'Agent returned no action and did not declare completion');
-				this.gemini.injectContent(`[automation context] Task "${name}" failed: agent returned no action`);
-				logger.error('Automation agent returned no action', { taskId, name });
+				this._injectAutomationContext(`[automation context] Task "${name}" failed: agent returned no action`, history);
+				this.metrics.automationFailed++;
+				this.log.error('Automation failed', { taskId, name, reason: 'agent_returned_no_action', durationMs: Date.now() - task.startedAt });
 				return;
 			}
 
@@ -547,16 +540,19 @@ export class TaskManager {
 				step_number: history.length + 1,
 				action_description: action.description,
 				outcome: result.success ? 'succeeded' : 'failed',
-				screenshot_before: dataUrlToImage(screenshotUrl),
 			};
 			history.push(stepRecord);
+			this.metrics.automationSteps++;
 
-			logger.info('Action executed', {
+			this.gemini.injectContent(
+				`[automation context] Task "${name}" step ${stepRecord.step_number}: ${stepRecord.action_description} → ${stepRecord.outcome}`
+			);
+
+			this.log.debug('Action executed', {
 				taskId,
 				step: history.length,
 				action: action.action,
 				elementId: action.element_id,
-				value: action.value,
 				success: result.success,
 				error: result.error,
 			});
@@ -565,13 +561,13 @@ export class TaskManager {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
 				this._sendAutomationEnd(taskId, 'cancelled');
-				logger.info('Automation cancelled after action', { taskId, step: history.length });
+				this.log.info('Automation cancelled', { taskId, name, durationMs: Date.now() - task.startedAt, steps: history.length, after: 'action' });
 				return;
 			}
 
 			if (!result.success) {
 				// Don't abort — let agent see the new state and decide
-				logger.warn('Action failed, agent will decide next step', {
+				this.log.debug('Action failed, agent will decide next step', {
 					taskId,
 					step: history.length,
 					error: result.error,
@@ -583,13 +579,29 @@ export class TaskManager {
 		this.session.automationSlot = null;
 		this.abortControllers.delete(taskId);
 		this._sendAutomationEnd(taskId, 'error', `Exceeded maximum steps (${MAX_STEPS})`);
-		this.gemini.injectContent(
-			`[automation context] Task "${name}" aborted after ${MAX_STEPS} steps without completing`
-		);
-		logger.error('Automation exceeded max steps', { taskId, name, maxSteps: MAX_STEPS });
+		this._injectAutomationContext(`[automation context] Task "${name}" aborted after ${MAX_STEPS} steps without completing`, history);
+		this.metrics.automationFailed++;
+		this.log.error('Automation failed', { taskId, name, reason: 'max_steps_exceeded', maxSteps: MAX_STEPS, durationMs: Date.now() - task.startedAt });
 	}
 
-	cancel(taskId: string): Record<string, unknown> {
+	cancel(name: string): Record<string, unknown> {
+		// Find the task by name across all slots
+		const researchSlotIndex = this.session.researchSlots.findIndex(
+			(s) => s?.name === name
+		);
+		const automationMatch = this.session.automationSlot?.name === name
+			? this.session.automationSlot
+			: null;
+
+		const task = researchSlotIndex !== -1
+			? this.session.researchSlots[researchSlotIndex]
+			: automationMatch;
+
+		if (!task) {
+			return { status: 'not_found', reason: 'no_running_task_with_that_name' };
+		}
+
+		const taskId = task.taskId;
 		this.session.cancelledTasks.add(taskId);
 		this.abortControllers.get(taskId)?.abort();
 		this.abortControllers.delete(taskId);
@@ -619,15 +631,11 @@ export class TaskManager {
 			this.pendingScreenshots.delete(requestId);
 		}
 
-		const slotIndex = this.session.researchSlots.findIndex(
-			(s) => s?.taskId === taskId
-		);
-		if (slotIndex !== -1) {
-			(this.session.researchSlots as Array<Task | null>)[slotIndex] =
-				null;
+		if (researchSlotIndex !== -1) {
+			(this.session.researchSlots as Array<Task | null>)[researchSlotIndex] = null;
 		}
 
-		logger.info('Task cancelled', { taskId });
-		return { status: 'cancelled' };
+		this.log.info('Task cancelled', { taskId, name });
+		return { status: 'cancelled', name };
 	}
 }
