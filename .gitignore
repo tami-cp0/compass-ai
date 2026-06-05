@@ -39,3 +39,7 @@ keys.json
 
 docs/
 .graphify*
+artifacts/
+
+apps/extension/pill-preview/
+sitemap*
