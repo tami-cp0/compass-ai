@@ -1,5 +1,10 @@
 /// <reference types="chrome" />
 import type { ExtensionMessage, ServerMessage, DomTaskType, WebIntent } from "@compass-ai/types"
+import type { PlasmoCSConfig } from "plasmo"
+
+export const config: PlasmoCSConfig = {
+  matches: ["https://app.atlassportfolios.com/*"]
+}
 
 type StripSessionId<T> = T extends { sessionId: string } ? Omit<T, "sessionId"> : T
 type OutboundMessage = StripSessionId<ExtensionMessage>

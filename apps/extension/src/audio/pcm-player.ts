@@ -1,5 +1,6 @@
 export class PcmPlayer {
   private audioCtx:  AudioContext | null = null
+  private analyser:  AnalyserNode | null = null
   private nextStart: number = 0
   private sampleRate: number
 
@@ -11,6 +12,9 @@ export class PcmPlayer {
   private getCtx(): AudioContext {
     if (!this.audioCtx) {
       this.audioCtx  = new AudioContext({ sampleRate: this.sampleRate })
+      this.analyser  = this.audioCtx.createAnalyser()
+      this.analyser.fftSize = 1024
+      this.analyser.connect(this.audioCtx.destination)
       this.nextStart = this.audioCtx.currentTime
     }
     return this.audioCtx
@@ -31,11 +35,16 @@ export class PcmPlayer {
 
     const source  = ctx.createBufferSource()
     source.buffer = buffer
-    source.connect(ctx.destination)
+    source.connect(this.analyser!)
 
     const startAt = Math.max(ctx.currentTime, this.nextStart)
     source.start(startAt)
     this.nextStart = startAt + buffer.duration
+  }
+
+  getAnalyser(): AnalyserNode | null {
+    this.getCtx()
+    return this.analyser
   }
 
   resume(): void {
@@ -45,6 +54,7 @@ export class PcmPlayer {
   stop(): void {
     this.audioCtx?.close()
     this.audioCtx  = null
+    this.analyser  = null
     this.nextStart = 0
   }
 }

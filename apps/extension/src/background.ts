@@ -7,7 +7,10 @@ type StripSessionId<T> = T extends { sessionId: string }
   : T
 type OutboundExtensionMessage = StripSessionId<ExtensionMessage>
 
-const WS_URL = "ws://localhost:8787/ws"
+const WS_URL = process.env.PLASMO_PUBLIC_WS_URL
+if (!WS_URL) {
+  throw new Error("PLASMO_PUBLIC_WS_URL is not set — build aborted")
+}
 
 let ws: WebSocket | null = null
 let sessionId: string | null = null
