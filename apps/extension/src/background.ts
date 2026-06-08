@@ -19,6 +19,15 @@ const DEGRADED_ENTER_MS = 1_000
 const DEGRADED_EXIT_MS  = 1_000
 const BUFFER_POLL_MS    = 250
 
+// Fixed reconnect schedule. After all attempts are exhausted the session is
+// torn down and the user must click the pill again to start fresh.
+const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000]
+
+// Outbound queue: messages sent while the WS is not yet open are buffered
+// and flushed in FIFO order when the WS opens.
+const outboundQueue: OutboundExtensionMessage[] = []
+const MAX_QUEUE = 50
+
 type ConnectionStatus = "ok" | "degraded" | "disconnected"
 
 let ws: WebSocket | null = null
@@ -95,6 +104,39 @@ function stopBufferWatch() {
   lowSince  = null
 }
 
+// Decide what bytes to send for a given outbound message. Returns the shaped
+// ExtensionMessage ready for JSON.stringify, or null if the message must be
+// dropped (e.g. non-session message with no active sessionId).
+function prepareForWire(message: OutboundExtensionMessage): ExtensionMessage | null {
+  const msgType = (message as { type: string }).type
+  // session_start / session_end / session_resume don't get a sessionId
+  // attached by us — they're either id-less or carry their own.
+  if (msgType === "session_start" || msgType === "session_end" || msgType === "session_resume") {
+    return message as ExtensionMessage
+  }
+  // All other messages require an active session
+  if (!sessionId) {
+    console.warn("[compass] dropping message — no active session", msgType)
+    return null
+  }
+  return { ...message, sessionId } as ExtensionMessage
+}
+
+// Flush all queued outbound messages through the now-open WebSocket.
+// Called at the top of ws.onopen, before the session-resume probe.
+function flushQueue() {
+  if (outboundQueue.length === 0) return
+  console.log(`[compass] flushing ${outboundQueue.length} queued message(s)`)
+  while (outboundQueue.length > 0) {
+    const msg = outboundQueue.shift()!
+    const wire = prepareForWire(msg)
+    if (wire === null) continue
+    ws!.send(JSON.stringify(wire))
+    // Mirror the session_end side-effect so state stays consistent.
+    if ((wire as { type: string }).type === "session_end") sessionId = null
+  }
+}
+
 function connect() {
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer)
@@ -107,6 +149,10 @@ function connect() {
     attempt = 0
     setConnectionStatus("ok")
     startBufferWatch()
+
+    // Drain any messages that arrived before the WS was ready.
+    flushQueue()
+
     if (sessionId) {
       console.log(`[compass] WS reconnected — resuming session ${sessionId}`)
       ws!.send(JSON.stringify({ type: "session_resume", sessionId } satisfies ExtensionMessage))
@@ -147,33 +193,48 @@ function connect() {
 }
 
 function scheduleReconnect() {
-  attempt += 1
-  const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 30_000)
+  if (attempt >= RECONNECT_DELAYS_MS.length) {
+    console.warn("[compass] reconnect attempts exhausted — tearing down session")
+    sessionId = null
+    sessionTabId = null
+    // connectionStatus is already "disconnected"; pill UI handles this state.
+    // Future reconnection only happens when the user clicks the pill again,
+    // which triggers session_start → sendRaw → connect() kick.
+    return
+  }
+
+  const delayMs = RECONNECT_DELAYS_MS[attempt]
   const delaySec = Math.round(delayMs / 1000)
-  console.log(`[compass] reconnecting in ${delaySec}s (attempt ${attempt})`)
+  console.log(`[compass] reconnecting in ${delaySec}s (attempt ${attempt + 1}/${RECONNECT_DELAYS_MS.length})`)
+  attempt += 1
   reconnectTimer = setTimeout(connect, delayMs)
 }
 
 function sendRaw(message: OutboundExtensionMessage) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.warn("[compass] dropping message — WS not open", (message as { type: string }).type)
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const wire = prepareForWire(message)
+    if (wire === null) return
+    ws.send(JSON.stringify(wire))
+    if ((wire as { type: string }).type === "session_end") sessionId = null
     return
   }
-  // session_start / session_end / session_resume don't get a sessionId
-  // attached by us — they're either id-less or carry their own.
-  const msgType = (message as { type: string }).type
-  if (msgType === "session_start" || msgType === "session_end" || msgType === "session_resume") {
-    ws.send(JSON.stringify(message))
-    if (msgType === "session_end") sessionId = null
-    return
+
+  // WS is not open — enqueue the message to be flushed when it opens.
+  if (outboundQueue.length >= MAX_QUEUE) {
+    const dropped = outboundQueue.shift()
+    console.warn("[compass] outbound queue full — dropped oldest message", (dropped as { type: string }).type)
   }
-  // All other messages require an active session
-  if (!sessionId) {
-    console.warn("[compass] dropping message — no active session", (message as { type: string }).type)
-    return
+  outboundQueue.push(message)
+
+  // If the WS is gone (null) and no reconnect is already scheduled, kick a
+  // fresh connect(). This covers: (a) cold extension load before first open,
+  // and (b) user click after reconnect was exhausted (sessionId will be null
+  // at that point, so connect() won't attempt session_resume).
+  if (ws === null && reconnectTimer === null) {
+    console.log("[compass] WS not open — starting connect() for queued message")
+    attempt = 0
+    connect()
   }
-  const outbound: ExtensionMessage = { ...message, sessionId } as ExtensionMessage
-  ws.send(JSON.stringify(outbound))
 }
 
 // Persistent port from content script — keeps the service worker alive so async
