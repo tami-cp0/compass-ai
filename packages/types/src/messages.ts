@@ -1,6 +1,7 @@
 // Extension → Gateway → Node
 export type ExtensionMessage =
   | { type: "session_start" }
+  | { type: "session_resume"; sessionId: string }
   | { type: "session_end" }
   | { type: "audio_chunk"; sessionId: string; data: string; mimeType: "audio/pcm" }
   | { type: "dom_snapshot"; sessionId: string; taskId: string; taskType: DomTaskType; screenshot: string; elementMap: string }
@@ -17,6 +18,7 @@ export type ServerMessage =
   | { type: "user_action_required"; sessionId: string; actionId: string; taskId: string; description: string }
   | { type: "session_init"; sessionId: string }
   | { type: "screenshot_request"; sessionId: string; requestId: string }
+  | { type: "connection_status"; status: "ok" | "degraded" | "disconnected" }
 
 export type DomTaskType = "click" | "form" | "read" | "structure"
 

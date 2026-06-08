@@ -4,7 +4,11 @@ import type { ExtensionMessage, ServerMessage } from '@compass-ai/types';
 import { createSession, deleteSession, sessionCount } from './session-store.js';
 import { logger, sessionLogger } from '../infra/logger.js';
 import { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
-import { getConversationHistory } from '../infra/redis.js';
+import {
+	deleteResumptionHandle,
+	getConversationHistory,
+	getResumptionHandle,
+} from '../infra/redis.js';
 import { TaskManager } from './task-manager.js';
 
 if (!process.env.PORT) {
@@ -93,7 +97,7 @@ export function startServer(): void {
 
 			const send = (m: ServerMessage) => ws.send(JSON.stringify(m));
 
-			if (msg.type === 'session_start') {
+			if (msg.type === 'session_start' || msg.type === 'session_resume') {
 				const existing = ws.getUserData().sessionId;
 				if (existing) {
 					const prev = apiSessions.get(existing);
@@ -106,7 +110,14 @@ export function startServer(): void {
 					logger.debug('Previous session torn down for re-start', { sessionId: existing });
 				}
 
-				const sessionId = uuidv4();
+				// Reuse the requested sessionId only if Gemini still has its context
+				// (i.e. handle is in Redis). Otherwise we start clean with a new id.
+				const resumeHandle =
+					msg.type === 'session_resume'
+						? await getResumptionHandle(msg.sessionId)
+						: null;
+				const sessionId =
+					resumeHandle && msg.type === 'session_resume' ? msg.sessionId : uuidv4();
 				ws.getUserData().sessionId = sessionId;
 
 				const history = await getConversationHistory(sessionId);
@@ -121,7 +132,7 @@ export function startServer(): void {
 					taskManager.dispatchAutomation(name, desc);
 				gemini.onCancelTask = (name) => taskManager.cancel(name);
 
-				await gemini.connect();
+				await gemini.connect({ resumeHandle });
 
 				ws.send(
 					JSON.stringify({
@@ -129,7 +140,10 @@ export function startServer(): void {
 						sessionId,
 					} satisfies ServerMessage)
 				);
-				logger.info('Session started', { sessionId, activeSessions: sessionCount() });
+				logger.info(resumeHandle ? 'Session resumed' : 'Session started', {
+					sessionId,
+					activeSessions: sessionCount(),
+				});
 				return;
 			}
 
@@ -143,6 +157,7 @@ export function startServer(): void {
 					apiSessions.delete(sessionId);
 				}
 				deleteSession(sessionId);
+				await deleteResumptionHandle(sessionId);
 				ws.getUserData().sessionId = null;
 				logger.info('Session ended by client', { sessionId, activeSessions: sessionCount() });
 				return;

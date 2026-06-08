@@ -2,11 +2,12 @@ import { useEffect, useRef } from "react"
 
 import { player } from "../lib/audio-runtime"
 
-export type BarsMode = "mic" | "speaker" | "idle"
+export type BarsMode = "mic" | "speaker" | "idle" | "flatline"
 
 const BAR_COUNT       = 14
 const MIN_BAR_HEIGHT  = 4
 const MAX_BAR_HEIGHT  = 24
+const FLAT_BAR_HEIGHT = 5
 const FREQ_RANGE_HZ   = { low: 80, high: 3000 }
 
 export function FrequencyBars({ mode }: { mode: BarsMode }) {
@@ -50,7 +51,7 @@ export function FrequencyBars({ mode }: { mode: BarsMode }) {
       tick()
     }
 
-    if (mode === "idle") { stop(); return }
+    if (mode === "idle" || mode === "flatline") { stop(); return }
 
     if (mode === "speaker") {
       const analyser = player.getAnalyser()
@@ -73,16 +74,36 @@ export function FrequencyBars({ mode }: { mode: BarsMode }) {
     return stop
   }, [mode])
 
+  const isFlat = mode === "flatline"
+
   return (
-    <div className="flex items-center gap-[3px] h-8 relative z-10">
-      {Array.from({ length: BAR_COUNT }).map((_, i) => (
-        <div
-          key={i}
-          ref={el => { barsRef.current[i] = el }}
-          className="w-[3px] bg-white rounded-full"
-          style={{ height: `${MIN_BAR_HEIGHT}px`, transition: "height 75ms ease" }}
-        />
-      ))}
+    <div className="relative flex items-center justify-center h-8 z-10" style={{ width: `${BAR_COUNT * 3 + (BAR_COUNT - 1) * 3}px` }}>
+      <div
+        className="absolute inset-0 flex items-center justify-center gap-[3px]"
+        style={{ opacity: isFlat ? 0 : 1, transition: "opacity 200ms ease" }}
+      >
+        {Array.from({ length: BAR_COUNT }).map((_, i) => (
+          <div
+            key={i}
+            ref={el => { barsRef.current[i] = el }}
+            className="w-[3px] bg-white rounded-full"
+            style={{ height: `${MIN_BAR_HEIGHT}px`, transition: "height 75ms ease" }}
+          />
+        ))}
+      </div>
+      <div
+        className="absolute inset-0 flex items-center justify-center gap-[3px]"
+        style={{ opacity: isFlat ? 1 : 0, transition: "opacity 200ms ease" }}
+        aria-hidden={!isFlat}
+      >
+        {Array.from({ length: BAR_COUNT }).map((_, i) => (
+          <div
+            key={i}
+            className="w-[3px] bg-white rounded-full"
+            style={{ height: `${FLAT_BAR_HEIGHT}px` }}
+          />
+        ))}
+      </div>
     </div>
   )
 }

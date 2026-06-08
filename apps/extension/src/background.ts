@@ -12,10 +12,83 @@ if (!WS_URL) {
   throw new Error("PLASMO_PUBLIC_WS_URL is not set — build aborted")
 }
 
+// Uplink congestion thresholds. Buffer climbing above HIGH for ENTER_MS
+// means user audio is no longer reaching the server in real time.
+const BUFFER_HIGH_BYTES = 40_000
+const DEGRADED_ENTER_MS = 1_000
+const DEGRADED_EXIT_MS  = 1_000
+const BUFFER_POLL_MS    = 250
+
+type ConnectionStatus = "ok" | "degraded" | "disconnected"
+
 let ws: WebSocket | null = null
 let sessionId: string | null = null
 let attempt = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let bufferPollTimer: ReturnType<typeof setInterval> | null = null
+// Starts at "ok" so the first ws.onclose actually broadcasts a state change
+// even though the WS hasn't connected yet.
+let connectionStatus: ConnectionStatus = "ok"
+let highSince: number | null = null
+let lowSince:  number | null = null
+
+function relayToActiveTab(msg: ServerMessage) {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs[0]
+    if (!tab?.id) return
+    chrome.tabs.sendMessage(tab.id, msg).catch(() => {})
+  })
+}
+
+// Status changes need to reach the pill regardless of which tab is "active"
+// — chrome.tabs.query with currentWindow is unreliable from a service worker.
+function broadcastToAllTabs(msg: ServerMessage) {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (!tab.id) continue
+      chrome.tabs.sendMessage(tab.id, msg).catch(() => {})
+    }
+  })
+}
+
+function setConnectionStatus(next: ConnectionStatus) {
+  if (next === connectionStatus) return
+  connectionStatus = next
+  broadcastToAllTabs({ type: "connection_status", status: next })
+}
+
+function startBufferWatch() {
+  if (bufferPollTimer !== null) return
+  highSince = null
+  lowSince  = null
+  bufferPollTimer = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    const buffered = ws.bufferedAmount
+    const now = Date.now()
+    if (buffered > BUFFER_HIGH_BYTES) {
+      lowSince = null
+      if (highSince === null) highSince = now
+      if (connectionStatus === "ok" && now - highSince >= DEGRADED_ENTER_MS) {
+        setConnectionStatus("degraded")
+      }
+    } else {
+      highSince = null
+      if (lowSince === null) lowSince = now
+      if (connectionStatus === "degraded" && now - lowSince >= DEGRADED_EXIT_MS) {
+        setConnectionStatus("ok")
+      }
+    }
+  }, BUFFER_POLL_MS)
+}
+
+function stopBufferWatch() {
+  if (bufferPollTimer !== null) {
+    clearInterval(bufferPollTimer)
+    bufferPollTimer = null
+  }
+  highSince = null
+  lowSince  = null
+}
 
 function connect() {
   if (reconnectTimer !== null) {
@@ -27,7 +100,14 @@ function connect() {
 
   ws.onopen = () => {
     attempt = 0
-    console.log("[compass] WS connected — waiting for mic to start session")
+    setConnectionStatus("ok")
+    startBufferWatch()
+    if (sessionId) {
+      console.log(`[compass] WS reconnected — resuming session ${sessionId}`)
+      ws!.send(JSON.stringify({ type: "session_resume", sessionId } satisfies ExtensionMessage))
+    } else {
+      console.log("[compass] WS connected — waiting for mic to start session")
+    }
   }
 
   ws.onmessage = (event: MessageEvent<string>) => {
@@ -45,22 +125,14 @@ function connect() {
       return
     }
 
-    // Relay all other ServerMessages to the active tab's content script
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tab = tabs[0]
-      if (!tab?.id) {
-        console.warn("[compass] no active tab to relay message to", msg.type)
-        return
-      }
-      chrome.tabs.sendMessage(tab.id, msg).catch(() => {
-        // Content scripts not loaded yet — swallow
-      })
-    })
+    relayToActiveTab(msg)
   }
 
   ws.onclose = () => {
-    sessionId = null
+    // sessionId is intentionally NOT cleared — onopen uses it to resume.
     ws = null
+    stopBufferWatch()
+    setConnectionStatus("disconnected")
     scheduleReconnect()
   }
 
@@ -82,10 +154,12 @@ function sendRaw(message: OutboundExtensionMessage) {
     console.warn("[compass] dropping message — WS not open", (message as { type: string }).type)
     return
   }
-  // session_start / session_end have no sessionId — send as-is
+  // session_start / session_end / session_resume don't get a sessionId
+  // attached by us — they're either id-less or carry their own.
   const msgType = (message as { type: string }).type
-  if (msgType === "session_start" || msgType === "session_end") {
+  if (msgType === "session_start" || msgType === "session_end" || msgType === "session_resume") {
     ws.send(JSON.stringify(message))
+    if (msgType === "session_end") sessionId = null
     return
   }
   // All other messages require an active session

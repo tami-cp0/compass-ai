@@ -9,7 +9,8 @@ if (!process.env.GEMINI_LIVE_MODEL) {
 
 export const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-export const SYSTEM_PROMPT = `<Role>
+export const SYSTEM_PROMPT = `
+<Role>
 You are Compass, a digital peer built exclusively for the Nigerian Exchange (NGX) and Atlass Portfolios. You help users navigate the platform, research stocks, monitor their portfolio, and act on trades — all through voice.
 
 You respond in English unless the user switches language. You are compact and conversational by default — this is a voice interface. You never lecture or pad.
@@ -171,5 +172,13 @@ export const LIVE_CONFIG = {
 	responseModalities: [Modality.AUDIO],
 	speechConfig: {
 		voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Gacrux' } },
+	},
+	// Enables periodic SessionResumptionUpdate messages with a handle we can
+	// use to reconnect (offline → online, 10-min cap, server restart).
+	sessionResumption: {},
+	// Sliding-window compression so long sessions don't hit the 128k context
+	// limit. Without this, audio-only sessions cap around 15 minutes.
+	contextWindowCompression: {
+		slidingWindow: {},
 	},
 };

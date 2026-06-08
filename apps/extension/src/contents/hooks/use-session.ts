@@ -14,11 +14,18 @@ export interface PendingConfirmation {
   description: string
 }
 
+export type ConnectionStatus = "ok" | "degraded" | "disconnected"
+
 export interface UseSession {
   active:              boolean
+  // True when the user wants a session, even if we've torn down capture due
+  // to offline. Used by the UI to keep showing the "in-session" layout.
+  wantSession:         boolean
   isSpeaking:          boolean
   isAutomationRunning: boolean
   confirmation:        PendingConfirmation | null
+  connectionStatus:    ConnectionStatus
+  isOffline:           boolean
   toggle:              () => void
 }
 
@@ -30,7 +37,21 @@ export function useSession(): UseSession {
   const [isSpeaking,          setIsSpeaking]          = useState(false)
   const [isAutomationRunning, setIsAutomationRunning] = useState(false)
   const [confirmation,        setConfirmation]        = useState<PendingConfirmation | null>(null)
+  const [connectionStatus,    setConnectionStatus]    = useState<ConnectionStatus>("ok")
+  const [isOffline,           setIsOffline]           = useState(typeof navigator !== "undefined" && !navigator.onLine)
+  const [wantSession,         setWantSession]         = useState(false)
   const captureRef = useRef<PcmCapture | null>(null)
+
+  useEffect(() => {
+    const onOnline  = () => setIsOffline(false)
+    const onOffline = () => setIsOffline(true)
+    window.addEventListener("online",  onOnline)
+    window.addEventListener("offline", onOffline)
+    return () => {
+      window.removeEventListener("online",  onOnline)
+      window.removeEventListener("offline", onOffline)
+    }
+  }, [])
 
   useEffect(() => {
     const onMessage = (msg: ServerMessage) => {
@@ -53,10 +74,23 @@ export function useSession(): UseSession {
         setConfirmation(null)
         return false
       }
+      if (msg.type === "connection_status") {
+        setConnectionStatus(msg.status)
+        return false
+      }
       return false
     }
     chrome.runtime.onMessage.addListener(onMessage)
     return () => chrome.runtime.onMessage.removeListener(onMessage)
+  }, [])
+
+  // Internal: stop mic capture only. Does NOT send session_end — the server
+  // keeps the Gemini resumption handle alive so we can resume on reconnect.
+  const teardownCapture = useCallback(() => {
+    captureRef.current?.stop()
+    captureRef.current = null
+    setActive(false)
+    setIsSpeaking(false)
   }, [])
 
   const startSession = useCallback(async () => {
@@ -74,18 +108,38 @@ export function useSession(): UseSession {
     setActive(true)
   }, [])
 
+  // Explicit user stop: tear down mic AND tell the server, which closes the
+  // Gemini session and deletes the resumption handle.
   const stopSession = useCallback(() => {
-    captureRef.current?.stop()
-    captureRef.current = null
+    setWantSession(false)
     chrome.runtime.sendMessage({ type: "session_end" })
-    setActive(false)
-    setIsSpeaking(false)
-  }, [])
+    teardownCapture()
+  }, [teardownCapture])
 
   const toggle = useCallback(() => {
-    if (active) stopSession()
-    else        startSession().catch(console.error)
-  }, [active, startSession, stopSession])
+    if (wantSession) {
+      stopSession()
+    } else {
+      setWantSession(true)
+      startSession().catch(console.error)
+    }
+  }, [wantSession, startSession, stopSession])
 
-  return { active, isSpeaking, isAutomationRunning, confirmation, toggle }
+  // Auto-stop on offline; auto-resume on online only if we paused it ourselves.
+  const pausedByOfflineRef = useRef(false)
+  useEffect(() => {
+    if (isOffline) {
+      if (captureRef.current) {
+        pausedByOfflineRef.current = true
+        teardownCapture()
+      }
+      return
+    }
+    if (wantSession && !captureRef.current && pausedByOfflineRef.current) {
+      pausedByOfflineRef.current = false
+      startSession().catch(console.error)
+    }
+  }, [isOffline, wantSession, teardownCapture, startSession])
+
+  return { active, wantSession, isSpeaking, isAutomationRunning, confirmation, connectionStatus, isOffline, toggle }
 }

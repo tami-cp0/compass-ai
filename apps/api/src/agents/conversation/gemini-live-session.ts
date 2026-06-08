@@ -1,7 +1,11 @@
 import type { LiveServerMessage, Session } from '@google/genai';
 import type { ServerMessage } from '@compass-ai/types';
 import { sessionLogger, type Logger } from '../../infra/logger.js';
-import { appendTurn, type ConversationHistory } from '../../infra/redis.js';
+import {
+	appendTurn,
+	setResumptionHandle,
+	type ConversationHistory,
+} from '../../infra/redis.js';
 import type { TokenTracker } from '../../infra/token-tracker.js';
 import { ai, LIVE_CONFIG, SYSTEM_PROMPT } from './live-config.js';
 
@@ -13,6 +17,8 @@ export class GeminiLiveSession {
 	private outputTranscriptBuffer = '';
 	private log: Logger;
 	private tokens: TokenTracker | null = null;
+	private currentHandle: string | null = null;
+	private reconnecting = false;
 	toolCallCount = 0;
 
 	// Tool call handlers — wired by TaskManager in Phase 6
@@ -36,29 +42,23 @@ export class GeminiLiveSession {
 		this.log = sessionLogger(sessionId);
 	}
 
-	async connect(): Promise<void> {
-		const historyContext =
-			this.history.summary || this.history.recentTurns.length > 0
-				? `\n\nConversation history:\n${
-						this.history.summary
-				  }\n${this.history.recentTurns
-						.map(
-							(t) =>
-								`${t.role === 'user' ? 'User' : 'Compass'}: ${
-									t.content
-								}`
-						)
-						.join('\n')}`
-				: '';
+	async connect(opts?: { resumeHandle?: string | null }): Promise<void> {
+		const resumeHandle = opts?.resumeHandle ?? null;
+		this.currentHandle = resumeHandle;
+
+		// When resuming, Gemini already holds the prior context — don't inject ours.
+		const historyContext = resumeHandle ? '' : this.formatHistoryContext();
 
 		this.session = await ai.live.connect({
 			model: process.env.GEMINI_LIVE_MODEL!,
 			config: {
 				systemInstruction: SYSTEM_PROMPT + historyContext,
 				...LIVE_CONFIG,
+				sessionResumption: resumeHandle ? { handle: resumeHandle } : {},
 			},
 			callbacks: {
-				onopen: () => this.log.debug('Gemini Live connected'),
+				onopen: () =>
+					this.log.debug('Gemini Live connected', { resumed: resumeHandle != null }),
 				onclose: (e) => {
 					const ev = e as { code?: number; reason?: string };
 					this.log.debug('Gemini Live closed', { code: ev?.code, reason: ev?.reason });
@@ -76,6 +76,14 @@ export class GeminiLiveSession {
 				},
 			},
 		});
+	}
+
+	private formatHistoryContext(): string {
+		if (!this.history.summary && this.history.recentTurns.length === 0) return '';
+		const turns = this.history.recentTurns
+			.map((t) => `${t.role === 'user' ? 'User' : 'Compass'}: ${t.content}`)
+			.join('\n');
+		return `\n\nConversation history:\n${this.history.summary}\n${turns}`;
 	}
 
 	setTokenTracker(tracker: TokenTracker): void {
@@ -102,7 +110,42 @@ export class GeminiLiveSession {
 		this.session = null;
 	}
 
+	private async reconnectWithHandle(): Promise<void> {
+		if (this.reconnecting || !this.currentHandle) return;
+		this.reconnecting = true;
+		const oldSession = this.session;
+		this.session = null;
+		try {
+			await this.connect({ resumeHandle: this.currentHandle });
+			oldSession?.close();
+		} catch (err) {
+			this.log.error('Gemini Live reconnect failed', {
+				error: err instanceof Error ? err : new Error(String(err)),
+			});
+		} finally {
+			this.reconnecting = false;
+		}
+	}
+
 	private async handleMessage(msg: LiveServerMessage): Promise<void> {
+		const resumption = msg.sessionResumptionUpdate;
+		if (resumption?.resumable && resumption.newHandle) {
+			this.currentHandle = resumption.newHandle;
+			setResumptionHandle(this.sessionId, resumption.newHandle).catch(
+				(err: unknown) =>
+					this.log.error('Redis setResumptionHandle failed', {
+						error: err instanceof Error ? err : new Error(String(err)),
+					})
+			);
+		}
+
+		// goAway = the 10-min cap is approaching. Swap the Gemini connection
+		// transparently; the extension sees no interruption.
+		if (msg.goAway) {
+			void this.reconnectWithHandle();
+			return;
+		}
+
 		// Token usage — emitted on most server messages
 		const um = msg.usageMetadata;
 		if (um && this.tokens) {

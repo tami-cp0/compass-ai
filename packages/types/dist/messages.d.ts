@@ -1,6 +1,9 @@
 export type ExtensionMessage = {
     type: "session_start";
 } | {
+    type: "session_resume";
+    sessionId: string;
+} | {
     type: "session_end";
 } | {
     type: "audio_chunk";
@@ -69,6 +72,9 @@ export type ServerMessage = {
     type: "screenshot_request";
     sessionId: string;
     requestId: string;
+} | {
+    type: "connection_status";
+    status: "ok" | "degraded" | "disconnected";
 };
 export type DomTaskType = "click" | "form" | "read" | "structure";
 export interface WebAction {

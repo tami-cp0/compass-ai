@@ -40,6 +40,21 @@ export async function saveConversationHistory(sessionId: string, history: Conver
   await redis.set(`conversation:${sessionId}`, JSON.stringify(history))
 }
 
+// Gemini Live caps handle validity around 10 minutes.
+const HANDLE_TTL_SECONDS = 600
+
+export async function setResumptionHandle(sessionId: string, handle: string): Promise<void> {
+  await redis.set(`gemini:handle:${sessionId}`, handle, "EX", HANDLE_TTL_SECONDS)
+}
+
+export async function getResumptionHandle(sessionId: string): Promise<string | null> {
+  return redis.get(`gemini:handle:${sessionId}`)
+}
+
+export async function deleteResumptionHandle(sessionId: string): Promise<void> {
+  await redis.del(`gemini:handle:${sessionId}`)
+}
+
 export async function appendTurn(
   sessionId: string,
   turn: { role: "user" | "model"; content: string }
