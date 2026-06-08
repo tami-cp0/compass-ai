@@ -97,7 +97,10 @@ const Pill = () => {
             ) : (
               <FrequencyBars mode={view.barsMode} />
             )}
-            <span className="relative z-10 text-white/90 text-sm whitespace-nowrap">
+            <span
+              className={`relative z-10 text-sm whitespace-nowrap ${view.isReconnecting ? "text_button text_button_fast" : "text-white/90"}`}
+              style={{ transform: "translateY(-1px)" }}
+            >
               {view.activeLabel}
             </span>
           </div>
