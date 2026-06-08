@@ -10,7 +10,7 @@ import { createEdgeGlow, type EdgeGlowHandle } from "./lib/edge-glow"
 import { derivePillView } from "./lib/pill-view"
 
 export const config: PlasmoCSConfig = {
-  matches: ["<all_urls>"]
+  matches: ["https://app.atlassportfolios.com/*"]
 }
 
 export const getStyle = () => {
@@ -23,7 +23,7 @@ const SLOW_TO_RECONNECTING_MS = 5_000
 const OFFLINE_FLASH_MS        = 5_000
 
 const Pill = () => {
-  const { active, wantSession, isSpeaking, isAutomationRunning, connectionStatus, isOffline, toggle } = useSession()
+  const { active, wantSession, isAutomationRunning, connectionStatus, isOffline, toggle } = useSession()
   const [showActive, setShowActive] = useState(false)
   const [degradedAged, setDegradedAged] = useState(false)
   const [offlineFlash, setOfflineFlash] = useState(false)
@@ -61,7 +61,7 @@ const Pill = () => {
   }, [isOffline, offlineFlash])
 
   const view = derivePillView({
-    active, wantSession, isSpeaking, isOffline, offlineFlash, showActive, degradedAged, connectionStatus,
+    active, wantSession, isOffline, offlineFlash, showActive, degradedAged, connectionStatus,
   })
 
   const handleClick = () => {

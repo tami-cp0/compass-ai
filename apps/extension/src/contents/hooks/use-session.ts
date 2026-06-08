@@ -21,7 +21,6 @@ export interface UseSession {
   // True when the user wants a session, even if we've torn down capture due
   // to offline. Used by the UI to keep showing the "in-session" layout.
   wantSession:         boolean
-  isSpeaking:          boolean
   isAutomationRunning: boolean
   confirmation:        PendingConfirmation | null
   connectionStatus:    ConnectionStatus
@@ -30,11 +29,10 @@ export interface UseSession {
 }
 
 // Orchestrates a Compass voice session: PCM capture lifecycle, background
-// runtime messaging, and the speaking / automation / confirmation state
-// surfaced through inbound ServerMessages.
+// runtime messaging, and the automation / confirmation state surfaced
+// through inbound ServerMessages.
 export function useSession(): UseSession {
   const [active,              setActive]              = useState(false)
-  const [isSpeaking,          setIsSpeaking]          = useState(false)
   const [isAutomationRunning, setIsAutomationRunning] = useState(false)
   const [confirmation,        setConfirmation]        = useState<PendingConfirmation | null>(null)
   const [connectionStatus,    setConnectionStatus]    = useState<ConnectionStatus>("ok")
@@ -58,7 +56,6 @@ export function useSession(): UseSession {
       if (msg.type === "audio_chunk") {
         player.resume()
         player.play(msg.data)
-        setIsSpeaking(true)
         return false
       }
       if (msg.type === "action") {
@@ -89,14 +86,13 @@ export function useSession(): UseSession {
   const teardownCapture = useCallback(() => {
     captureRef.current?.stop()
     captureRef.current = null
+    player.stop()
     setActive(false)
-    setIsSpeaking(false)
   }, [])
 
   const startSession = useCallback(async () => {
     chrome.runtime.sendMessage({ type: "session_start" })
     const capture = new PcmCapture((base64Pcm: string) => {
-      setIsSpeaking(false)
       chrome.runtime.sendMessage({
         type:     "audio_chunk",
         data:     base64Pcm,
@@ -141,5 +137,5 @@ export function useSession(): UseSession {
     }
   }, [isOffline, wantSession, teardownCapture, startSession])
 
-  return { active, wantSession, isSpeaking, isAutomationRunning, confirmation, connectionStatus, isOffline, toggle }
+  return { active, wantSession, isAutomationRunning, confirmation, connectionStatus, isOffline, toggle }
 }

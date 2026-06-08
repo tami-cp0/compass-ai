@@ -1,0 +1,265 @@
+/* =============================================
+   PIN PANEL — static pane using the active pill's exact colors
+   ============================================= */
+
+.pin-panel {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  bottom: auto;
+  left: auto;
+  border-radius: 24px;
+  transform-origin: top right;
+  overflow: hidden;
+  background: linear-gradient(
+    135deg,
+    hsla(161, 65%, 20%, 0.5) 0%,
+    hsla(161, 65%, 30%, 0.4) 40%,
+    hsla(161, 65%, 40%, 0.5) 60%,
+    hsla(161, 65%, 15%, 0.5) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
+    inset 0 -1px 0 hsla(161, 65%, 10%, 0.4),
+    0 4px 16px hsla(161, 65%, 30%, 0.4);
+  transition:
+    width 350ms ease-out,
+    height 350ms ease-out,
+    border-radius 350ms ease-out;
+}
+
+/* Collapsed puck. Overrides any inline width/height set by Gemini. */
+.pin-panel.collapsed {
+  width: 40px !important;
+  height: 40px !important;
+  border-radius: 20px;
+  cursor: pointer;
+}
+
+/* Stage 1 of expand: width animates from 40px to Gemini's target while height stays at 40px. */
+.pin-panel.expanding-width {
+  height: 40px !important;
+  border-radius: 20px;
+}
+
+/* Stage 2 of expand: height animates from 40px to Gemini's target. */
+.pin-panel.expanding-height {
+  border-radius: 24px;
+}
+
+/* Puck icon — centered inside 40x40 collapsed state. */
+.pin-panel__puck-icon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: hsla(0, 0%, 100%, 0.85);
+}
+
+/* Open-state container with header + body. Faded in once .open is reached. */
+.pin-panel__inner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  transition: opacity 200ms ease-in;
+  pointer-events: none;
+}
+
+.pin-panel.open .pin-panel__inner {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.pin-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px 8px 14px;
+  flex-shrink: 0;
+}
+
+.pin-panel__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: hsla(0, 0%, 100%, 0.95);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.pin-panel__collapse-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: hsla(0, 0%, 100%, 0.7);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0;
+}
+
+.pin-panel__collapse-btn:hover {
+  background: hsla(0, 0%, 100%, 0.1);
+  color: hsla(0, 0%, 100%, 0.95);
+}
+
+/* Body — no scroll. Content is sized by Gemini to fit. */
+.pin-panel__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 14px 12px 14px;
+  overflow: hidden;
+  color: hsla(0, 0%, 100%, 0.95);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+/* Markdown element styles — tight, professional. */
+.pin-panel__body .pp-p,
+.pin-panel__body .pp-ul,
+.pin-panel__body .pp-ol {
+  margin: 0 0 6px 0;
+}
+
+.pin-panel__body .pp-p:last-child,
+.pin-panel__body .pp-ul:last-child,
+.pin-panel__body .pp-ol:last-child {
+  margin-bottom: 0;
+}
+
+.pin-panel__body .pp-ul,
+.pin-panel__body .pp-ol {
+  padding-left: 18px;
+}
+
+.pin-panel__body .pp-li {
+  margin: 0 0 2px 0;
+}
+
+.pin-panel__body .pp-li:last-child {
+  margin-bottom: 0;
+}
+
+.pin-panel__body .pp-h {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 8px 0 4px 0;
+  color: hsla(0, 0%, 100%, 0.98);
+}
+
+.pin-panel__body .pp-h:first-child {
+  margin-top: 0;
+}
+
+.pin-panel__body h4.pp-h {
+  font-size: 15px;
+}
+
+.pin-panel__body .pp-strong {
+  font-weight: 600;
+  color: hsla(0, 0%, 100%, 1);
+}
+
+.pin-panel__body .pp-em {
+  font-style: italic;
+}
+
+.pin-panel__body .pp-del {
+  text-decoration: line-through;
+  color: hsla(0, 0%, 100%, 0.6);
+}
+
+.pin-panel__body .pp-blockquote {
+  margin: 6px 0;
+  padding: 6px 10px 6px 12px;
+  border-left: 3px solid hsla(50, 100%, 75%, 0.95);
+  background: hsla(0, 0%, 100%, 0.08);
+  border-radius: 4px;
+  color: hsla(0, 0%, 100%, 0.95);
+  font-style: italic;
+}
+
+.pin-panel__body .pp-blockquote > .pp-p:last-child {
+  margin-bottom: 0;
+}
+
+.pin-panel__body .pp-hr {
+  border: 0;
+  height: 1px;
+  background: hsla(0, 0%, 100%, 0.25);
+  margin: 16px 0;
+}
+
+.pin-panel__body .pp-code {
+  background: hsla(0, 0%, 0%, 0.3);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.pin-panel__body .pp-pre {
+  background: hsla(0, 0%, 0%, 0.3);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  margin: 0 0 6px 0;
+  overflow: hidden;
+}
+
+.pin-panel__body .pp-pre .pp-code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+.pin-panel__body .pp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  margin: 0 0 6px 0;
+}
+
+.pin-panel__body .pp-table th,
+.pin-panel__body .pp-table td {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid hsla(0, 0%, 100%, 0.15);
+}
+
+.pin-panel__body .pp-table th {
+  font-weight: 600;
+  color: hsla(0, 0%, 100%, 0.85);
+}
+
+.pin-panel__body .pp-a {
+  color: hsla(161, 65%, 75%, 1);
+  text-decoration: underline;
+}
+
+/* Icon sits 8px from top-right always. When the panel is 40x40, that lands
+   the 24x24 icon visually centered (40 - 8 - 24 = 8 on the other side). */
+.pin-panel__collapse {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: hsla(0, 0%, 100%, 0.85);
+  cursor: pointer;
+  border-radius: 9999px;
+}

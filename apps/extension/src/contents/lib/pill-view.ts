@@ -11,7 +11,6 @@ export type PillState =
 export interface PillViewInputs {
   active:           boolean
   wantSession:      boolean
-  isSpeaking:       boolean
   isOffline:        boolean
   offlineFlash:     boolean
   showActive:       boolean
@@ -30,7 +29,7 @@ export interface PillView {
 }
 
 export function derivePillView(input: PillViewInputs): PillView {
-  const { active, wantSession, isSpeaking, isOffline, offlineFlash, showActive, degradedAged, connectionStatus } = input
+  const { active, wantSession, isOffline, offlineFlash, showActive, degradedAged, connectionStatus } = input
 
   // wantSession (not active) drives the in-session layout — capture may be
   // paused due to offline while the user still wants the session.
@@ -47,7 +46,7 @@ export function derivePillView(input: PillViewInputs): PillView {
   // Bars animate only when truly active+ok; flatline elsewhere inside the bars
   // layout. Idle offline flash uses the icon layout, so barsMode stays "idle".
   const barsMode: BarsMode =
-    pillState === "active" && active && showActive                                  ? (isSpeaking ? "speaker" : "mic")
+    pillState === "active" && active && showActive                                  ? "mic"
     : showActive && (pillState === "slow" || (pillState === "offline" && wantSession)) ? "flatline"
     : "idle"
 
@@ -55,7 +54,6 @@ export function derivePillView(input: PillViewInputs): PillView {
     pillState === "offline" ? "you are offline"
     : isReconnecting        ? "reconnecting"
     : pillState === "slow"  ? "slow network"
-    : isSpeaking            ? "speaking"
     : "listening"
 
   const widthClass =
@@ -63,7 +61,7 @@ export function derivePillView(input: PillViewInputs): PillView {
     : pillState === "offline"              ? "w-[165px]" // icon + "you are offline"
     : isReconnecting                       ? "w-[140px]" // spinner + "reconnecting"
     : pillState === "slow"                 ? "w-[180px]" // bars + "slow network"
-    : pillState === "active"               ? "w-[170px]" // bars + "listening"/"speaking"
+    : pillState === "active"               ? "w-[170px]" // bars + "listening"
     : "w-[130px]"                                        // icon + "Compass"
 
   const tintClass =

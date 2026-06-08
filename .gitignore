@@ -43,3 +43,6 @@ artifacts/
 
 apps/extension/pill-preview/
 sitemap*
+
+# Throwaway test server
+ws-echo.js

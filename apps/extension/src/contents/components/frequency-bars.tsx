@@ -1,8 +1,6 @@
 import { useEffect, useRef } from "react"
 
-import { player } from "../lib/audio-runtime"
-
-export type BarsMode = "mic" | "speaker" | "idle" | "flatline"
+export type BarsMode = "mic" | "idle" | "flatline"
 
 const BAR_COUNT       = 14
 const MIN_BAR_HEIGHT  = 4
@@ -52,12 +50,6 @@ export function FrequencyBars({ mode }: { mode: BarsMode }) {
     }
 
     if (mode === "idle" || mode === "flatline") { stop(); return }
-
-    if (mode === "speaker") {
-      const analyser = player.getAnalyser()
-      if (analyser) animate(analyser)
-      return stop
-    }
 
     // mic
     navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {

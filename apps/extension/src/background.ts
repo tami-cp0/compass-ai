@@ -23,6 +23,11 @@ type ConnectionStatus = "ok" | "degraded" | "disconnected"
 
 let ws: WebSocket | null = null
 let sessionId: string | null = null
+// The tab that owns the active session. Captured from sender.tab on
+// session_start. chrome.tabs.query({active, currentWindow}) is unreliable
+// from a service worker — focus may be on DevTools or another window when
+// a server message arrives, dropping relays silently.
+let sessionTabId: number | null = null
 let attempt = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let bufferPollTimer: ReturnType<typeof setInterval> | null = null
@@ -32,12 +37,12 @@ let connectionStatus: ConnectionStatus = "ok"
 let highSince: number | null = null
 let lowSince:  number | null = null
 
-function relayToActiveTab(msg: ServerMessage) {
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    const tab = tabs[0]
-    if (!tab?.id) return
-    chrome.tabs.sendMessage(tab.id, msg).catch(() => {})
-  })
+function relayToSessionTab(msg: ServerMessage) {
+  if (sessionTabId === null) {
+    console.warn("[compass] dropping server message — no session tab tracked", { type: msg.type })
+    return
+  }
+  chrome.tabs.sendMessage(sessionTabId, msg).catch(() => {})
 }
 
 // Status changes need to reach the pill regardless of which tab is "active"
@@ -125,7 +130,7 @@ function connect() {
       return
     }
 
-    relayToActiveTab(msg)
+    relayToSessionTab(msg)
   }
 
   ws.onclose = () => {
@@ -199,7 +204,17 @@ chrome.runtime.onConnect.addListener((port) => {
 })
 
 // Relay fire-and-forget messages from pill.tsx (audio_chunk, session_start, session_end, user_action_result).
-chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage, _sender, _sendResponse) => {
+chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage, sender, _sendResponse) => {
+  // Track which tab owns the session so server messages relay back to the
+  // right place even when focus is elsewhere (DevTools, another window).
+  // We adopt the tab id on any content-script-originated message during a
+  // session — session_start may race with audio_chunks, and a missed capture
+  // there would leave sessionTabId null and silently drop every server reply.
+  if (message.type === "session_end") {
+    sessionTabId = null
+  } else if (sender.tab?.id !== undefined && sessionTabId === null) {
+    sessionTabId = sender.tab.id
+  }
   sendRaw(message)
   return false
 })
