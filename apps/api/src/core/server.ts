@@ -1,4 +1,4 @@
-import { App, DISABLED } from 'uWebSockets.js';
+import { App, DISABLED, type us_listen_socket } from 'uWebSockets.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ExtensionMessage, ServerMessage } from '@compass-ai/types';
 import { createSession, deleteSession, sessionCount } from './session-store.js';
@@ -56,7 +56,23 @@ function emitSessionSummary(sessionId: string, apiSession: ApiSession, closeCode
 	});
 }
 
-export function startServer(): void {
+/**
+ * Closes all active Gemini sessions in parallel (Promise.allSettled so one
+ * stuck close doesn't block the others), emits a summary log for each, then
+ * clears the map. Called by the process-level shutdown handler in index.ts.
+ */
+export async function shutdownAllSessions(): Promise<void> {
+	const entries = [...apiSessions.entries()];
+	await Promise.allSettled(
+		entries.map(async ([sessionId, apiSession]) => {
+			emitSessionSummary(sessionId, apiSession);
+			await apiSession.gemini.close();
+		})
+	);
+	apiSessions.clear();
+}
+
+export function startServer(): us_listen_socket | false {
 	const app = App();
 
 	app.ws<{ sessionId: string | null }>('/ws', {
@@ -253,12 +269,15 @@ export function startServer(): void {
 		},
 	});
 
+	let listenSocket: us_listen_socket | false = false;
 	app.listen(PORT, (token) => {
 		if (token) {
+			listenSocket = token;
 			logger.info('Server listening', { port: PORT });
 		} else {
 			logger.fatal('Failed to start server', { port: PORT });
 			process.exit(1);
 		}
 	});
+	return listenSocket;
 }
