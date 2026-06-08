@@ -19,6 +19,8 @@ export type ServerMessage =
   | { type: "session_init"; sessionId: string }
   | { type: "screenshot_request"; sessionId: string; requestId: string }
   | { type: "connection_status"; status: "ok" | "degraded" | "disconnected" }
+  | { type: "pin_pane_set"; sessionId: string; title: string; markdown: string; width: number; height: number }
+  | { type: "pin_pane_clear"; sessionId: string }
 
 export type DomTaskType = "click" | "form" | "read" | "structure"
 

@@ -30,6 +30,10 @@ export class GeminiLiveSession {
 		| null = null;
 	onCancelTask: ((name: string) => Record<string, unknown>) | null = null;
 	onRequestScreenshot: (() => Promise<string>) | null = null;
+	onSetPinPane:
+		| ((title: string, markdown: string, width: number, height: number) => Record<string, unknown>)
+		| null = null;
+	onClearPinPane: (() => Record<string, unknown>) | null = null;
 
 	constructor(
 		sessionId: string,
@@ -52,21 +56,19 @@ export class GeminiLiveSession {
 		this.session = await ai.live.connect({
 			model: process.env.GEMINI_LIVE_MODEL!,
 			config: {
-				systemInstruction: SYSTEM_PROMPT + historyContext,
+				systemInstruction: { parts: [{ text: SYSTEM_PROMPT + historyContext }] },
 				...LIVE_CONFIG,
 				sessionResumption: resumeHandle ? { handle: resumeHandle } : {},
 			},
 			callbacks: {
-				onopen: () =>
-					this.log.debug('Gemini Live connected', { resumed: resumeHandle != null }),
+				onopen: () => this.log.debug('Gemini Live connected', { resumed: resumeHandle != null }),
 				onclose: (e) => {
 					const ev = e as { code?: number; reason?: string };
 					this.log.debug('Gemini Live closed', { code: ev?.code, reason: ev?.reason });
 				},
-				onerror: (e) =>
-					this.log.error('Gemini Live error', {
-						error: e instanceof Error ? e : new Error(String(e)),
-					}),
+				onerror: (e) => this.log.error('Gemini Live error', {
+					error: e instanceof Error ? e : new Error(String(e)),
+				}),
 				onmessage: (msg: LiveServerMessage) => {
 					this.handleMessage(msg).catch((err: unknown) =>
 						this.log.error('handleMessage error', {
@@ -237,32 +239,20 @@ export class GeminiLiveSession {
 				});
 				// screenshot is always the only tool in a batch — flush the
 				// function response first (protocol requires it before clientContent),
-				// then inject the image as a follow-up user turn
+				// then inject the image as a follow-up media frame
 				this.session?.sendToolResponse({ functionResponses: responses });
 				responses.length = 0;
 				if (dataUrl) {
 					const commaIdx = dataUrl.indexOf(',');
 					const base64 =
 						commaIdx !== -1 ? dataUrl.slice(commaIdx + 1) : dataUrl;
-					this.session?.sendClientContent({
-						turns: [
-							{
-								role: 'user',
-								parts: [
-									{ text: '[page screenshot]' },
-									{
-										inlineData: {
-											mimeType: 'image/jpeg',
-											data: base64,
-										},
-									},
-								],
-							},
-						],
-						turnComplete: false,
+					this.session?.sendRealtimeInput({
+						video: { data: base64, mimeType: 'image/jpeg' },
 					});
 				}
 				return;
+			} else if (call.name === 'clear_pin_pane' && this.onClearPinPane) {
+				result = this.onClearPinPane();
 			} else {
 				// All other tools require args
 				if (!call.args) {
@@ -273,26 +263,33 @@ export class GeminiLiveSession {
 					});
 					continue;
 				}
-				const args = call.args as Record<string, string>;
+				const args = call.args as Record<string, unknown>;
 
 				if (
 					call.name === 'dispatch_research' &&
 					this.onDispatchResearch
 				) {
 					result = this.onDispatchResearch(
-						args.name,
-						args.description
+						args.name as string,
+						args.description as string
 					);
 				} else if (
 					call.name === 'dispatch_automation' &&
 					this.onDispatchAutomation
 				) {
 					result = this.onDispatchAutomation(
-						args.name,
-						args.description
+						args.name as string,
+						args.description as string
 					);
 				} else if (call.name === 'cancel_task' && this.onCancelTask) {
-					result = this.onCancelTask(args.name);
+					result = this.onCancelTask(args.name as string);
+				} else if (call.name === 'set_pin_pane' && this.onSetPinPane) {
+					result = this.onSetPinPane(
+						args.title as string,
+						args.markdown as string,
+						Number(args.width),
+						Number(args.height)
+					);
 				} else {
 					result = {
 						status: 'acknowledged',

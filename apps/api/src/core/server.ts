@@ -131,6 +131,34 @@ export function startServer(): void {
 				gemini.onDispatchAutomation = (name, desc) =>
 					taskManager.dispatchAutomation(name, desc);
 				gemini.onCancelTask = (name) => taskManager.cancel(name);
+				gemini.onSetPinPane = (title, markdown, width, height) => {
+					// Server clamps only to absolute sanity limits. The extension
+					// further clamps width at render time to fit between the pill
+					// and the viewport edge.
+					const requestedWidth = Math.max(220, Math.round(width));
+					const appliedHeight = Math.max(120, Math.min(640, Math.round(height)));
+					logger.info('[pin-pane] set_pin_pane called', {
+						sessionId,
+						title,
+						width: requestedWidth,
+						height: appliedHeight,
+						markdownLength: markdown.length,
+					});
+					send({
+						type: 'pin_pane_set',
+						sessionId,
+						title,
+						markdown,
+						width: requestedWidth,
+						height: appliedHeight,
+					});
+					return { status: 'rendered', appliedWidth: requestedWidth, appliedHeight };
+				};
+				gemini.onClearPinPane = () => {
+					logger.info('[pin-pane] clear_pin_pane called', { sessionId });
+					send({ type: 'pin_pane_clear', sessionId });
+					return { status: 'cleared' };
+				};
 
 				await gemini.connect({ resumeHandle });
 
@@ -150,6 +178,7 @@ export function startServer(): void {
 			if (msg.type === 'session_end') {
 				const sessionId = ws.getUserData().sessionId;
 				if (!sessionId) return;
+				send({ type: 'pin_pane_clear', sessionId });
 				const apiSession = apiSessions.get(sessionId);
 				if (apiSession) {
 					emitSessionSummary(sessionId, apiSession);
