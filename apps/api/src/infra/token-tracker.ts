@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 const IS_DEV = process.env.NODE_ENV === "development"
 const _dir = dirname(fileURLToPath(import.meta.url))
 // apps/api/src/infra → apps/api/logs
-const OUTPUT_PATH = join(_dir, "..", "..", "logs", "tokens.json")
+const OUTPUT_DIR = join(_dir, "..", "..", "logs")
 
 export interface TokenUsage {
   inputTokens: number
@@ -69,14 +69,15 @@ function emptyReport(sessionId: string): SessionReport {
 export class TokenTracker {
   private report: SessionReport
   private enabled: boolean
+  private outputPath: string
 
   constructor(sessionId: string) {
     this.enabled = IS_DEV
     this.report = emptyReport(sessionId)
+    this.outputPath = join(OUTPUT_DIR, `tokens-${sessionId}.json`)
     if (this.enabled) {
-      // Overwrite on session start.
       try {
-        mkdirSync(dirname(OUTPUT_PATH), { recursive: true })
+        mkdirSync(OUTPUT_DIR, { recursive: true })
       } catch {
         /* dir already exists */
       }
@@ -143,8 +144,8 @@ export class TokenTracker {
 
   // Atomic write: tmp file + rename. Avoids partial reads if the file is being tailed.
   private flush(): void {
-    const tmp = OUTPUT_PATH + ".tmp"
+    const tmp = this.outputPath + ".tmp"
     writeFileSync(tmp, JSON.stringify(this.report, null, 2), "utf8")
-    renameSync(tmp, OUTPUT_PATH)
+    renameSync(tmp, this.outputPath)
   }
 }
