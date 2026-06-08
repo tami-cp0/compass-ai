@@ -9,6 +9,9 @@ import {
 import type { TokenTracker } from '../../infra/token-tracker.js';
 import { ai, LIVE_CONFIG, SYSTEM_PROMPT } from './live-config.js';
 
+// Backoff delays (ms) for reconnectWithHandle. Capped at 8 s after 3 doublings.
+const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000];
+
 export class GeminiLiveSession {
 	private sessionId: string;
 	private send: (msg: ServerMessage) => void;
@@ -117,13 +120,28 @@ export class GeminiLiveSession {
 		this.reconnecting = true;
 		const oldSession = this.session;
 		this.session = null;
+		let lastErr: unknown;
 		try {
-			await this.connect({ resumeHandle: this.currentHandle });
-			oldSession?.close();
-		} catch (err) {
-			this.log.error('Gemini Live reconnect failed', {
-				error: err instanceof Error ? err : new Error(String(err)),
+			for (let attempt = 0; attempt < RECONNECT_DELAYS_MS.length; attempt++) {
+				if (attempt > 0) {
+					const delay = RECONNECT_DELAYS_MS[attempt - 1];
+					this.log.debug('Gemini Live reconnect retrying', { attempt, delayMs: delay });
+					await new Promise<void>((r) => setTimeout(r, delay));
+				}
+				try {
+					await this.connect({ resumeHandle: this.currentHandle });
+					this.log.info('Gemini Live reconnected', { attempt });
+					oldSession?.close();
+					return;
+				} catch (err) {
+					lastErr = err;
+				}
+			}
+			// All attempts exhausted
+			this.log.error('Gemini Live reconnect exhausted', {
+				error: lastErr instanceof Error ? lastErr : new Error(String(lastErr)),
 			});
+			oldSession?.close();
 		} finally {
 			this.reconnecting = false;
 		}
@@ -215,6 +233,11 @@ export class GeminiLiveSession {
 			response: Record<string, unknown>;
 		}> = [];
 
+		// Captured screenshot payload — sent as a realtimeInput frame AFTER the
+		// batched toolResponse (protocol requires functionResponses before any
+		// clientContent/realtimeInput follow-up).
+		let screenshotImageBase64: string | null = null;
+
 		for (const call of toolCall.functionCalls) {
 			let result: Record<string, unknown>;
 
@@ -232,25 +255,19 @@ export class GeminiLiveSession {
 					name: call.name ?? '',
 					response: screenshotResult,
 				});
+				if (dataUrl) {
+					const commaIdx = dataUrl.indexOf(',');
+					screenshotImageBase64 =
+						commaIdx !== -1 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+				}
 				this.toolCallCount++;
 				this.log.debug('Tool call handled', {
 					tool: call.name,
 					status: screenshotResult.status,
 				});
-				// screenshot is always the only tool in a batch — flush the
-				// function response first (protocol requires it before clientContent),
-				// then inject the image as a follow-up media frame
-				this.session?.sendToolResponse({ functionResponses: responses });
-				responses.length = 0;
-				if (dataUrl) {
-					const commaIdx = dataUrl.indexOf(',');
-					const base64 =
-						commaIdx !== -1 ? dataUrl.slice(commaIdx + 1) : dataUrl;
-					this.session?.sendRealtimeInput({
-						video: { data: base64, mimeType: 'image/jpeg' },
-					});
-				}
-				return;
+				// Continue processing any remaining tools in this batch — the
+				// screenshot image frame is sent after the full toolResponse below.
+				continue;
 			} else if (call.name === 'clear_pin_pane' && this.onClearPinPane) {
 				result = this.onClearPinPane();
 			} else {
@@ -311,5 +328,13 @@ export class GeminiLiveSession {
 		}
 
 		this.session?.sendToolResponse({ functionResponses: responses });
+
+		// Send the screenshot image as a follow-up media frame — AFTER the batched
+		// toolResponse (protocol requires functionResponses before realtimeInput).
+		if (screenshotImageBase64 !== null) {
+			this.session?.sendRealtimeInput({
+				video: { data: screenshotImageBase64, mimeType: 'image/jpeg' },
+			});
+		}
 	}
 }
