@@ -3,7 +3,7 @@ import type { ExtensionMessage, ServerMessage, DomTaskType, WebIntent } from "@c
 import type { PlasmoCSConfig } from "plasmo"
 
 export const config: PlasmoCSConfig = {
-  matches: ["https://app.atlassportfolios.com/*"]
+  matches: ["<all_urls>"]
 }
 
 type StripSessionId<T> = T extends { sessionId: string } ? Omit<T, "sessionId"> : T

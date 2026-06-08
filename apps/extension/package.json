@@ -32,7 +32,7 @@
   },
   "manifest": {
     "host_permissions": [
-      "https://app.atlassportfolios.com/*"
+      "<all_urls>"
     ],
     "permissions": [
       "tabs",
