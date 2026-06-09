@@ -149,6 +149,7 @@ export async function webAgentNextStep(
 					{
 						type: 'input_image',
 						image_url: screenshot,
+						fidelity: "high"
 					},
 					{
 						type: 'input_text',
