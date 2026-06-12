@@ -237,6 +237,26 @@ export function startServer(): us_listen_socket | false {
 				return;
 			}
 
+			if (msg.type === 'agent_dispatch_debug') {
+				if (!IS_DEV) {
+					logger.warn('agent_dispatch_debug ignored — not in development mode', { sessionId });
+					return;
+				}
+				const result = apiSession.taskManager.dispatchAutomation(msg.name, msg.description);
+				logger.info('Debug automation dispatched from console', { sessionId, name: msg.name, ...result });
+				return;
+			}
+
+			if (msg.type === 'agent_cancel_debug') {
+				if (!IS_DEV) {
+					logger.warn('agent_cancel_debug ignored — not in development mode', { sessionId });
+					return;
+				}
+				const result = apiSession.taskManager.cancel(msg.name);
+				logger.info('Debug cancel dispatched from console', { sessionId, name: msg.name, ...result });
+				return;
+			}
+
 			logger.warn('Unhandled message type', {
 				sessionId,
 				type: (msg as ExtensionMessage).type,

@@ -12,6 +12,7 @@ import { runWebAgentStep, type WebObservation } from '../agents/web/web-step.js'
 import { WebAgentMemory } from '../agents/web/web-memory.js';
 import { sessionLogger, type Logger } from '../infra/logger.js';
 import { TokenTracker } from '../infra/token-tracker.js';
+import { nowReadableWAT } from '../infra/datetime.js';
 
 export interface SessionMetrics {
 	researchDispatched: number;
@@ -124,7 +125,7 @@ export class TaskManager {
 				const body = JSON.stringify(result);
 				const MAX = 10_000;
 				const trimmed = body.length > MAX ? body.slice(0, MAX) + '\n[...truncated]' : body;
-				const payload = `[research_result: ${name}]\n${trimmed}`;
+				const payload = `[research_result: ${name}]\nCompleted at: ${nowReadableWAT()}\n${trimmed}`;
 				this.gemini.injectContent(payload);
 				this.metrics.researchCompleted++;
 				this.log.info('Research completed', {
@@ -143,7 +144,9 @@ export class TaskManager {
 				(this.session.researchSlots as Array<Task | null>)[slotIndex] = null;
 				this.abortControllers.delete(taskId);
 				const error = err instanceof Error ? err : new Error(String(err));
-				this.gemini.injectContent(`[research error] Task "${name}" failed: ${error.message}`);
+				this.gemini.injectContent(
+					`[research error] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}`
+				);
 				this.metrics.researchFailed++;
 				this.log.error('Research failed', {
 					taskId,
@@ -309,9 +312,10 @@ export class TaskManager {
 	}
 
 	private _runAutomation(task: Task): void {
-		const { taskId, name } = task;
+		const { taskId, name, description } = task;
+		const memory = new WebAgentMemory(description);
 
-		this._runAutomationLoop(task).catch((err: unknown) => {
+		this._runAutomationLoop(task, memory).catch((err: unknown) => {
 			this.pendingObservations.delete(taskId);
 			if (this.session.cancelledTasks.has(taskId)) {
 				this.log.debug('Automation error discarded — task was cancelled', { taskId });
@@ -321,8 +325,10 @@ export class TaskManager {
 			this.abortControllers.delete(taskId);
 			const error = err instanceof Error ? err : new Error(String(err));
 			this._sendAutomationEnd(taskId, 'error', error.message);
+			const progressLog = memory.renderProgressLog();
+			const logSegment = progressLog ? `\n${progressLog}` : '';
 			this.gemini.injectContent(
-				`[automation context] Task "${name}" failed: ${error.message}\nautomation_slot_freed: true`
+				`[automation context] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}${logSegment}\nautomation_slot_freed: true`
 			);
 			this.metrics.automationFailed++;
 			this.log.error('Automation failed', {
@@ -334,11 +340,9 @@ export class TaskManager {
 		});
 	}
 
-	private async _runAutomationLoop(task: Task): Promise<void> {
+	private async _runAutomationLoop(task: Task, memory: WebAgentMemory): Promise<void> {
 		const { taskId, name, description } = task;
 		const MAX_STEPS = 20;
-
-		const memory = new WebAgentMemory(description);
 
 		while (memory.stepCount < MAX_STEPS) {
 			if (this._isCancelled(taskId, task, 'before observation', memory.stepCount)) return;
@@ -350,6 +354,7 @@ export class TaskManager {
 			if (!obsMsg) {
 				this._failAutomation(
 					task,
+					memory,
 					`Observation timed out at step ${memory.stepCount + 1}`,
 					'observation_timeout',
 					memory.stepCount
@@ -403,18 +408,18 @@ export class TaskManager {
 				}
 			}
 
-			memory.recordTurn(step.reasoning, step.actions, results);
+			memory.recordTurn(step.reasoning, step.progress_note, step.actions, results);
 
 			if (terminal) {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
 
+				const progressLog = memory.renderProgressLog();
+
 				if (terminal.variant === 'task:done') {
 					this._sendAutomationEnd(taskId, 'complete');
 					this.gemini.injectContent(
-						`[automation context] Task "${name}" completed in ${memory.stepCount} step(s). Evidence: ${
-							terminal.evidence
-						}\nautomation_slot_freed: true`
+						`[automation context] Task "${name}" completed in ${memory.stepCount} step(s).\nCompleted at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nEvidence: ${terminal.evidence}\nautomation_slot_freed: true`
 					);
 					this.metrics.automationCompleted++;
 					this.log.info('Automation completed', {
@@ -426,9 +431,7 @@ export class TaskManager {
 				} else if (terminal.variant === 'task:fail') {
 					this._sendAutomationEnd(taskId, 'error', terminal.reason);
 					this.gemini.injectContent(
-						`[automation context] Task "${name}" could not be completed after ${memory.stepCount} step(s): ${
-							terminal.reason
-						}\nautomation_slot_freed: true`
+						`[automation context] Task "${name}" could not be completed after ${memory.stepCount} step(s): ${terminal.reason}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nautomation_slot_freed: true`
 					);
 					this.metrics.automationFailed++;
 					this.log.error('Automation failed', {
@@ -442,10 +445,26 @@ export class TaskManager {
 				}
 				return;
 			}
+
+			// Mid-run heartbeat every 2 completed steps. Silent context only —
+			// Gemini gets the running summary without being prompted to narrate.
+			// Tagged as a heartbeat so successive ticks coalesce in the inject
+			// queue: if the model was speaking through several steps, only the
+			// most recent heartbeat for this task flushes.
+			if (memory.stepCount % 2 === 0) {
+				const recent = memory.recentProgressNotes(2)
+					.map((p) => `Step ${p.stepNumber}: ${p.note}`)
+					.join('\n');
+				this.gemini.injectContent(
+					`[automation in progress] Task "${name}" — step ${memory.stepCount}/${MAX_STEPS}.\nGoal: ${description}\n${recent}`,
+					{ kind: 'heartbeat', key: `automation:${taskId}` }
+				);
+			}
 		}
 
 		this._failAutomation(
 			task,
+			memory,
 			`Exceeded maximum steps (${MAX_STEPS})`,
 			'max_steps_exceeded',
 			memory.stepCount
@@ -454,16 +473,19 @@ export class TaskManager {
 
 	private _failAutomation(
 		task: Task,
+		memory: WebAgentMemory,
 		errorMsg: string,
 		reason: string,
 		steps: number
 	): void {
-		const { taskId, name } = task;
+		const { taskId, name, description } = task;
 		this.session.automationSlot = null;
 		this.abortControllers.delete(taskId);
 		this._sendAutomationEnd(taskId, 'error', errorMsg);
+		const progressLog = memory.renderProgressLog();
+		const logSegment = progressLog ? `\n${progressLog}` : '';
 		this.gemini.injectContent(
-			`[automation context] Task "${name}" failed: ${errorMsg}\nautomation_slot_freed: true`
+			`[automation context] Task "${name}" failed: ${errorMsg}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}${logSegment}\nautomation_slot_freed: true`
 		);
 		this.metrics.automationFailed++;
 		this.log.error('Automation failed', {

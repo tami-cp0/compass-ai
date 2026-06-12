@@ -7,6 +7,10 @@ export type ExtensionMessage =
   | { type: "screenshot_response"; sessionId: string; requestId: string; dataUrl: string }
   | { type: "agent_observation"; sessionId: string; taskId: string; screenshot: string; width: number; height: number; url: string; title: string }
   | { type: "agent_action_result"; sessionId: string; taskId: string; actionId: string; success: boolean; error?: string }
+  // Dev-only: dispatched from the service-worker console via __runWebAgent
+  // / __cancelWebAgent. The API ignores these in production.
+  | { type: "agent_dispatch_debug"; sessionId: string; name: string; description: string }
+  | { type: "agent_cancel_debug"; sessionId: string; name: string }
 
 // Node → Gateway → Extension
 export type ServerMessage =
@@ -53,5 +57,9 @@ export interface AgentActionResult {
 // One reasoning + action plan from the step planner.
 export interface AgentStep {
   reasoning: string
+  // One-line post-action observation describing what visibly changed on the
+  // page (or "no change"). Surfaced to the orchestrating model as the
+  // automation's externalized progress log; reasoning stays internal.
+  progress_note: string
   actions: AgentAction[]
 }

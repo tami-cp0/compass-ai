@@ -11,6 +11,7 @@ import type { AgentAction, AgentActionResult } from '@compass-ai/types';
 export interface MemoryTurn {
 	stepNumber: number;
 	reasoning: string;
+	progressNote: string;
 	actions: AgentAction[];
 	results: AgentActionResult[];
 }
@@ -27,13 +28,35 @@ export class WebAgentMemory {
 		return this.turns.length;
 	}
 
-	recordTurn(reasoning: string, actions: AgentAction[], results: AgentActionResult[]): void {
+	recordTurn(
+		reasoning: string,
+		progressNote: string,
+		actions: AgentAction[],
+		results: AgentActionResult[]
+	): void {
 		this.turns.push({
 			stepNumber: this.turns.length + 1,
 			reasoning,
+			progressNote,
 			actions,
 			results,
 		});
+	}
+
+	// All progress notes, oldest → newest, formatted as "Step N: <note>".
+	// Used to hand the externalized action log to the orchestrating model.
+	renderProgressLog(): string {
+		return this.turns
+			.map((t) => `Step ${t.stepNumber}: ${t.progressNote}`)
+			.join('\n');
+	}
+
+	// Last N progress notes for mid-run heartbeats.
+	recentProgressNotes(count: number): { stepNumber: number; note: string }[] {
+		return this.turns.slice(-count).map((t) => ({
+			stepNumber: t.stepNumber,
+			note: t.progressNote,
+		}));
 	}
 
 	// Recent turn summary for the next prompt. Last 5 turns is enough to

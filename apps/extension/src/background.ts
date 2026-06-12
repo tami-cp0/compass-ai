@@ -23,11 +23,11 @@ const BUFFER_POLL_MS    = 250
 // torn down and the user must click the pill again to start fresh.
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000]
 
-// Screenshot dimensions matched to compass's existing OpenAI flow. The agent
-// gets coordinates in this space and we scale them up to the viewport before
-// dispatching CDP input events.
-const SCREENSHOT_MAX_W = 1024
-const SCREENSHOT_MAX_H = 768
+// Screenshots ship at native CSS-pixel resolution (captureVisibleTab returns
+// physical pixels; we resample by 1/dpr exactly once). No further cap — model
+// coords are then 1:1 with what CDP dispatches. Gemini Live (flat 258 tokens
+// at high-res) and GPT-5.4 Mini (saturates at 6 tiles for any 16:9 viewport)
+// both prefer this; resolution doesn't move the needle on cost.
 
 const DEBUGGER_PROTOCOL_VERSION = "1.3"
 
@@ -196,9 +196,6 @@ function connect() {
       return
     }
     if (msg.type === "automation_end") {
-      // Drop this task's coord scale explicitly, even though detachAgentDebugger
-      // clears the whole map — keeps intent obvious if detach behavior changes.
-      taskScale.delete(msg.taskId)
       void detachAgentDebugger()
       relayToSessionTab(msg) // let pill UI know the run ended
       return
@@ -264,59 +261,43 @@ function sendRaw(message: OutboundExtensionMessage) {
 // ─── Screenshot capture + resize (service-worker safe) ───────────────────────
 
 interface CapturedFrame {
-  base64: string          // base64 (no data: prefix) of the resized PNG
-  width: number           // resized width
-  height: number          // resized height
-  viewportWidth: number   // CSS-pixel viewport of the source tab
-  viewportHeight: number  // CSS-pixel viewport of the source tab
+  base64: string  // raw base64 PNG (no data: prefix)
+  width: number   // CSS-pixel width (= viewport width)
+  height: number  // CSS-pixel height (= viewport height)
 }
 
 async function captureFromTab(tabId: number): Promise<CapturedFrame> {
   const tab = await chrome.tabs.get(tabId)
+  // PNG: lossless capture. JPEG would discard high-frequency detail (text,
+  // edges) before we ever look at the bitmap.
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-    format: "jpeg",
-    quality: 75,
+    format: "png",
   })
   if (!dataUrl) throw new Error("captureVisibleTab returned empty")
 
   // viewport = physical pixels / dpr (CSS pixels)
-  const [dpr, vw, vh] = await readViewport(tabId)
+  const [, vw, vh] = await readViewport(tabId)
 
-  // Source bitmap is at physical pixels; convert to a blob then bitmap.
+  // Source bitmap is at physical pixels (vw × dpr, vh × dpr).
   const sourceBlob = await (await fetch(dataUrl)).blob()
   const sourceBitmap = await createImageBitmap(sourceBlob)
 
-  // Fit into SCREENSHOT_MAX_W × SCREENSHOT_MAX_H preserving aspect ratio.
-  // Target dims are computed from CSS-pixel viewport (vw × vh), not physical,
-  // so the resulting image is always in CSS-pixel space at the agent's end.
-  let outW = vw
-  let outH = vh
-  if (outW > SCREENSHOT_MAX_W || outH > SCREENSHOT_MAX_H) {
-    const ratio = Math.min(SCREENSHOT_MAX_W / outW, SCREENSHOT_MAX_H / outH)
-    outW = Math.round(outW * ratio)
-    outH = Math.round(outH * ratio)
-  }
-
-  const canvas = new OffscreenCanvas(outW, outH)
+  // Output at CSS-pixel size (vw × vh). No cap. Coords the model emits map
+  // 1:1 to viewport CSS pixels, which is what CDP expects.
+  const canvas = new OffscreenCanvas(vw, vh)
   const ctx = canvas.getContext("2d")
   if (!ctx) throw new Error("Failed to acquire 2D canvas context")
-  // Disable smoothing — crisp pixels read better through downscaling.
-  ctx.imageSmoothingEnabled = false
-  ctx.drawImage(sourceBitmap, 0, 0, outW, outH)
+  // Smoothing on (bilinear/bicubic) — better for non-integer dpr downscales
+  // (e.g. dpr=1.5) than nearest-neighbor. On dpr=1 (no scale) and dpr=2
+  // (integer scale) the setting is effectively a no-op.
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = "high"
+  ctx.drawImage(sourceBitmap, 0, 0, vw, vh)
 
   const outBlob = await canvas.convertToBlob({ type: "image/png" })
   const base64 = await blobToBase64(outBlob)
 
-  // Avoid void usage in service-worker logs
-  void dpr
-
-  return {
-    base64,
-    width: outW,
-    height: outH,
-    viewportWidth: vw,
-    viewportHeight: vh,
-  }
+  return { base64, width: vw, height: vh }
 }
 
 async function readViewport(tabId: number): Promise<[number, number, number]> {
@@ -385,24 +366,11 @@ async function handleGeminiScreenshotRequest(requestId: string): Promise<void> {
 
 // ─── Agent observation ───────────────────────────────────────────────────────
 
-// Per-task scale used to map model coords (sized to the resized screenshot)
-// back to viewport CSS pixels (what CDP expects).
-interface ObservationScale {
-  scaleX: number
-  scaleY: number
-}
-const taskScale = new Map<string, ObservationScale>()
-
 async function handleObservationRequest(taskId: string): Promise<void> {
   try {
     if (sessionTabId === null) throw new Error("no session tab")
     const tab = await chrome.tabs.get(sessionTabId)
     const frame = await captureFromTab(sessionTabId)
-
-    taskScale.set(taskId, {
-      scaleX: frame.viewportWidth / frame.width,
-      scaleY: frame.viewportHeight / frame.height,
-    })
 
     sendRaw({
       type: "agent_observation",
@@ -474,7 +442,6 @@ async function detachAgentDebugger(): Promise<void> {
     })
   }
   attachedTabs.clear()
-  taskScale.clear()
   lastMouse = { x: 0, y: 0 }
 }
 
@@ -646,15 +613,6 @@ async function waitForStability(tabId: number, timeout = STABILITY_TIMEOUT_MS): 
   await sleep(SETTLE_MS)
 }
 
-// Map (x, y) emitted by the model (in resized-screenshot space) back to
-// viewport CSS pixels (what CDP expects). Falls back to identity if we
-// haven't seen an observation for this task.
-function mapCoord(taskId: string, x: number, y: number): { x: number; y: number } {
-  const s = taskScale.get(taskId)
-  if (!s) return { x, y }
-  return { x: Math.round(x * s.scaleX), y: Math.round(y * s.scaleY) }
-}
-
 async function handleAction(taskId: string, actionId: string, action: AgentAction): Promise<void> {
   try {
     if (sessionTabId === null) throw new Error("no session tab")
@@ -667,7 +625,7 @@ async function handleAction(taskId: string, actionId: string, action: AgentActio
 
     switch (action.variant) {
       case "mouse:click": {
-        const { x, y } = mapCoord(taskId, action.x, action.y)
+        const { x, y } = action
         await moveMouse(tabId, x, y, MOUSE_MOVE_STEPS)
         await mouse(tabId, "mousePressed", x, y, { button: "left", clickCount: 1 })
         await mouse(tabId, "mouseReleased", x, y, { button: "left", clickCount: 1 })
@@ -675,7 +633,7 @@ async function handleAction(taskId: string, actionId: string, action: AgentActio
         break
       }
       case "mouse:double_click": {
-        const { x, y } = mapCoord(taskId, action.x, action.y)
+        const { x, y } = action
         await moveMouse(tabId, x, y, 1)
         await mouse(tabId, "mousePressed", x, y, { button: "left", clickCount: 1 })
         await mouse(tabId, "mouseReleased", x, y, { button: "left", clickCount: 1 })
@@ -685,7 +643,7 @@ async function handleAction(taskId: string, actionId: string, action: AgentActio
         break
       }
       case "mouse:right_click": {
-        const { x, y } = mapCoord(taskId, action.x, action.y)
+        const { x, y } = action
         await moveMouse(tabId, x, y, MOUSE_MOVE_STEPS)
         await mouse(tabId, "mousePressed", x, y, { button: "right", clickCount: 1 })
         await mouse(tabId, "mouseReleased", x, y, { button: "right", clickCount: 1 })
@@ -693,8 +651,7 @@ async function handleAction(taskId: string, actionId: string, action: AgentActio
         break
       }
       case "mouse:drag": {
-        const from = mapCoord(taskId, action.from.x, action.from.y)
-        const to = mapCoord(taskId, action.to.x, action.to.y)
+        const { from, to } = action
         await moveMouse(tabId, from.x, from.y, 1)
         await mouse(tabId, "mousePressed", from.x, from.y, { button: "left", clickCount: 1 })
         await sleep(DRAG_HOLD_MS)
@@ -704,14 +661,9 @@ async function handleAction(taskId: string, actionId: string, action: AgentActio
         break
       }
       case "mouse:scroll": {
-        const { x, y } = mapCoord(taskId, action.x, action.y)
-        // deltas stay in target screenshot space scaled to viewport so a
-        // "scroll 400px down" in model space scrolls a proportional amount.
-        const s = taskScale.get(taskId)
-        const dx = s ? Math.round(action.deltaX * s.scaleX) : action.deltaX
-        const dy = s ? Math.round(action.deltaY * s.scaleY) : action.deltaY
+        const { x, y, deltaX, deltaY } = action
         await moveMouse(tabId, x, y, 1)
-        await mouse(tabId, "mouseWheel", x, y, { deltaX: dx, deltaY: dy })
+        await mouse(tabId, "mouseWheel", x, y, { deltaX, deltaY })
         await waitForStability(tabId)
         break
       }
@@ -830,3 +782,55 @@ connect()
 
 chrome.runtime.onInstalled.addListener(() => {})
 chrome.runtime.onStartup.addListener(() => {})
+
+// ─── Dev console helpers ─────────────────────────────────────────────────────
+// Exposed on globalThis so they're callable from the service-worker devtools
+// console (chrome://extensions → "service worker" link). Stripped from
+// production builds — server also ignores the debug message when NODE_ENV is
+// "production".
+if (process.env.NODE_ENV !== "production") {
+  type DebugDispatch = (description: string, name?: string) => void
+  type DebugCancel   = (name: string) => void
+
+  const runWebAgent: DebugDispatch = (description, name) => {
+    if (!sessionId) {
+      console.warn(
+        "[compass] __runWebAgent: no active session. Click the pill to start one first.",
+      )
+      return
+    }
+    if (typeof description !== "string" || description.trim().length === 0) {
+      console.warn(
+        '[compass] __runWebAgent: usage __runWebAgent("describe the task", "optional-name")',
+      )
+      return
+    }
+    const taskName = name ?? `console-task-${Date.now()}`
+    sendRaw({ type: "agent_dispatch_debug", name: taskName, description })
+    console.log(
+      `[compass] __runWebAgent → dispatched name="${taskName}" description="${description.slice(0, 80)}"`,
+    )
+  }
+
+  const cancelWebAgent: DebugCancel = (name) => {
+    if (!sessionId) {
+      console.warn("[compass] __cancelWebAgent: no active session.")
+      return
+    }
+    if (typeof name !== "string" || name.length === 0) {
+      console.warn('[compass] __cancelWebAgent: usage __cancelWebAgent("task-name")')
+      return
+    }
+    sendRaw({ type: "agent_cancel_debug", name })
+    console.log(`[compass] __cancelWebAgent → dispatched name="${name}"`)
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(globalThis as any).__runWebAgent = runWebAgent
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(globalThis as any).__cancelWebAgent = cancelWebAgent
+
+  console.log(
+    "[compass] DEV: __runWebAgent(description, name?) and __cancelWebAgent(name) are available in this console",
+  )
+}

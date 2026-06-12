@@ -8,6 +8,8 @@ import {
 } from '../../infra/redis.js';
 import type { TokenTracker } from '../../infra/token-tracker.js';
 import { ai, LIVE_CONFIG, SYSTEM_PROMPT } from './live-config.js';
+import { nowReadableWAT } from '../../infra/datetime.js';
+import { lookupTicker } from '../../data/ngx-equities.js';
 
 // Backoff delays (ms) for reconnectWithHandle. Capped at 8 s after 3 doublings.
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000];
@@ -23,6 +25,16 @@ export class GeminiLiveSession {
 	private currentHandle: string | null = null;
 	private reconnecting = false;
 	toolCallCount = 0;
+
+	// Inject gating. `sendClientContent` interrupts the model mid-utterance
+	// regardless of turnComplete, so we queue background injections (research
+	// results, automation context, heartbeats) until the model is idle.
+	private isModelSpeaking = false;
+	private processingToolCall = false;
+	private injectQueue: Array<
+		| { kind: 'normal'; text: string }
+		| { kind: 'heartbeat'; key: string; text: string }
+	> = [];
 
 	// Tool call handlers — wired by TaskManager in Phase 6
 	onDispatchResearch:
@@ -60,10 +72,14 @@ export class GeminiLiveSession {
 		// When resuming, Gemini already holds the prior context — don't inject ours.
 		const historyContext = resumeHandle ? '' : this.formatHistoryContext();
 
+		// Appended last so the static SYSTEM_PROMPT (and history) sit at the
+		// cacheable prefix. Only this trailing line is volatile per session.
+		const wakeContext = `\n\n<Session_Clock>\nYou came online on ${nowReadableWAT()}. Treat this as your default reference for "now" — market hours, holiday checks, freshness of cached information. It is a snapshot; if precision matters or the session has been running for a while, call request_current_time for an exact refresh. Timestamp lines on async injections ("Completed at: …", "Failed at: …") are also authoritative "now" signals.\n</Session_Clock>`;
+
 		this.session = await ai.live.connect({
 			model: process.env.GEMINI_LIVE_MODEL!,
 			config: {
-				systemInstruction: { parts: [{ text: SYSTEM_PROMPT + historyContext }] },
+				systemInstruction: { parts: [{ text: SYSTEM_PROMPT + historyContext + wakeContext }] },
 				...LIVE_CONFIG,
 				sessionResumption: resumeHandle ? { handle: resumeHandle } : {},
 			},
@@ -106,12 +122,37 @@ export class GeminiLiveSession {
 		});
 	}
 
-	injectContent(text: string): void {
+	// Queue a one-way context inject for Gemini. Safe to call any time —
+	// flushes immediately when the model is idle, otherwise waits until the
+	// current turn ends (or the active tool-call batch resolves) to avoid
+	// barging in mid-utterance. Heartbeats with the same `key` coalesce,
+	// so a backlog of stale progress notes collapses to the latest one.
+	injectContent(
+		text: string,
+		opts?: { kind?: 'heartbeat'; key?: string }
+	): void {
 		if (!this.session) return;
-		this.session.sendClientContent({
-			turns: [{ role: 'user', parts: [{ text }] }],
-			turnComplete: false,
-		});
+		if (opts?.kind === 'heartbeat' && opts.key) {
+			this.injectQueue = this.injectQueue.filter(
+				(q) => !(q.kind === 'heartbeat' && q.key === opts.key)
+			);
+			this.injectQueue.push({ kind: 'heartbeat', key: opts.key, text });
+		} else {
+			this.injectQueue.push({ kind: 'normal', text });
+		}
+		this.flushInjectQueue();
+	}
+
+	private flushInjectQueue(): void {
+		if (!this.session) return;
+		if (this.isModelSpeaking || this.processingToolCall) return;
+		while (this.injectQueue.length > 0) {
+			const item = this.injectQueue.shift()!;
+			this.session.sendClientContent({
+				turns: [{ role: 'user', parts: [{ text: item.text }] }],
+				turnComplete: false,
+			});
+		}
 	}
 
 	async close(): Promise<void> {
@@ -186,6 +227,9 @@ export class GeminiLiveSession {
 			p.inlineData?.mimeType?.startsWith('audio/')
 		);
 		if (audioPart?.inlineData) {
+			// First audio chunk of a turn opens the speaking gate; queued
+			// injects wait for turnComplete / interrupted.
+			this.isModelSpeaking = true;
 			this.send({
 				type: 'audio_chunk',
 				sessionId: this.sessionId,
@@ -227,9 +271,22 @@ export class GeminiLiveSession {
 			);
 		}
 
+		// Close the speaking gate on natural turn end or user-driven interrupt,
+		// then flush any background injects that piled up while the model was
+		// speaking.
+		if (msg.serverContent?.turnComplete || msg.serverContent?.interrupted) {
+			this.isModelSpeaking = false;
+			this.flushInjectQueue();
+		}
+
 		// Tool calls — handle synchronously, respond immediately
 		const toolCall = msg.toolCall;
 		if (!toolCall?.functionCalls?.length) return;
+
+		// Hold injects until this tool-call batch and its follow-up media frame
+		// have been sent, so a background task that completes mid-handler can't
+		// interleave clientContent with the required functionResponses/realtimeInput.
+		this.processingToolCall = true;
 
 		const responses: Array<{
 			id: string;
@@ -274,6 +331,8 @@ export class GeminiLiveSession {
 				continue;
 			} else if (call.name === 'clear_pin_pane' && this.onClearPinPane) {
 				result = this.onClearPinPane();
+			} else if (call.name === 'request_current_time') {
+				result = { time: nowReadableWAT() };
 			} else {
 				// All other tools require args
 				if (!call.args) {
@@ -305,6 +364,8 @@ export class GeminiLiveSession {
 					);
 				} else if (call.name === 'cancel_task' && this.onCancelTask) {
 					result = this.onCancelTask(args.name as string);
+				} else if (call.name === 'lookup_ticker') {
+					result = { ...lookupTicker(args.query as string) };
 				} else if (call.name === 'set_pin_pane' && this.onSetPinPane) {
 					result = this.onSetPinPane(
 						args.title as string,
@@ -341,5 +402,10 @@ export class GeminiLiveSession {
 				video: { data: screenshotImageBase64, mimeType: 'image/jpeg' },
 			});
 		}
+
+		// Release the tool-call gate and drain any injects that piled up while
+		// the handler was awaiting the screenshot capture.
+		this.processingToolCall = false;
+		this.flushInjectQueue();
 	}
 }

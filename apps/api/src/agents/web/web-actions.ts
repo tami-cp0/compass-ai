@@ -13,6 +13,7 @@ export const WEB_AGENT_STEP_SCHEMA = {
 		additionalProperties: false,
 		properties: {
 			reasoning: { type: 'string' },
+			progress_note: { type: 'string' },
 			actions: {
 				type: 'array',
 				items: {
@@ -185,7 +186,7 @@ export const WEB_AGENT_STEP_SCHEMA = {
 				},
 			},
 		},
-		required: ['reasoning', 'actions'],
+		required: ['reasoning', 'progress_note', 'actions'],
 	},
 };
 
