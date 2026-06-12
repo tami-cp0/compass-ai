@@ -222,18 +222,13 @@ export function startServer(): us_listen_socket | false {
 				return;
 			}
 
-			if (msg.type === 'dom_snapshot') {
-				apiSession.taskManager.handleDomSnapshot(msg);
+			if (msg.type === 'agent_observation') {
+				apiSession.taskManager.handleAgentObservation(msg);
 				return;
 			}
 
-			if (msg.type === 'action_result') {
-				apiSession.taskManager.handleActionResult(msg);
-				return;
-			}
-
-			if (msg.type === 'user_action_result') {
-				apiSession.taskManager.handleUserActionResult(msg);
+			if (msg.type === 'agent_action_result') {
+				apiSession.taskManager.handleAgentActionResult(msg);
 				return;
 			}
 

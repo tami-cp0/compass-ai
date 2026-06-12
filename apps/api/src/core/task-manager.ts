@@ -1,15 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
 import type {
+	AgentAction,
+	AgentActionResult,
 	ExtensionMessage,
 	SessionState,
-	StepRecord,
 	Task,
-	WebAction,
-	WebIntent,
 } from '@compass-ai/types';
 import type { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
 import { runResearchAgent } from '../agents/research/research-agent.js';
-import { webAgentNextStep } from '../agents/web/web-agent.js';
+import { runWebAgentStep, type WebObservation } from '../agents/web/web-step.js';
+import { WebAgentMemory } from '../agents/web/web-memory.js';
 import { sessionLogger, type Logger } from '../infra/logger.js';
 import { TokenTracker } from '../infra/token-tracker.js';
 
@@ -22,6 +22,16 @@ export interface SessionMetrics {
 	automationFailed: number;
 	automationSteps: number;
 }
+
+// Variants that terminate the loop. Anything after one of these in the same
+// batch is silently dropped.
+const TERMINAL_VARIANTS = new Set(['task:done', 'task:fail']);
+
+// Per-variant action timeouts (ms). Heavy SPAs can take 20s+ to settle after
+// navigation, so we give those a longer leash than mouse/keyboard inputs.
+const NAV_VARIANTS = new Set(['browser:nav', 'browser:nav:back', 'browser:tab:switch', 'browser:tab:new']);
+const NAV_ACTION_TIMEOUT_MS = 30_000;
+const DEFAULT_ACTION_TIMEOUT_MS = 20_000;
 
 export class TaskManager {
 	private session: SessionState;
@@ -38,26 +48,13 @@ export class TaskManager {
 		automationFailed: 0,
 		automationSteps: 0,
 	};
-	private pendingSnapshots = new Map<
+	private pendingObservations = new Map<
 		string,
-		(
-			msg: Extract<ExtensionMessage, { type: 'dom_snapshot' }> | null
-		) => void
+		(msg: Extract<ExtensionMessage, { type: 'agent_observation' }> | null) => void
 	>();
 	private pendingActionResults = new Map<
 		string,
-		(
-			msg: Extract<ExtensionMessage, { type: 'action_result' }> | null
-		) => void
-	>();
-	private pendingUserActionResults = new Map<
-		string,
-		(
-			msg: Extract<
-				ExtensionMessage,
-				{ type: 'user_action_result' }
-			> | null
-		) => void
+		(msg: Extract<ExtensionMessage, { type: 'agent_action_result' }> | null) => void
 	>();
 	private pendingScreenshots = new Map<string, (dataUrl: string) => void>();
 
@@ -75,9 +72,7 @@ export class TaskManager {
 		description: string,
 		profile: 'stock_analysis' | 'general_research'
 	): Record<string, unknown> {
-		const slotIndex = this.session.researchSlots.findIndex(
-			(s) => s === null
-		);
+		const slotIndex = this.session.researchSlots.findIndex((s) => s === null);
 		if (slotIndex === -1) {
 			return { status: 'rejected', reason: 'research_slots_full', free_research_slots_remaining: 0 };
 		}
@@ -104,7 +99,8 @@ export class TaskManager {
 		return {
 			taskId,
 			status: 'dispatched',
-			free_research_slots_remaining: this.session.researchSlots.filter(s => s === null).length - 1,
+			free_research_slots_remaining:
+				this.session.researchSlots.filter((s) => s === null).length - 1,
 		};
 	}
 
@@ -122,16 +118,12 @@ export class TaskManager {
 					this.log.debug('Research result discarded — task was cancelled', { taskId });
 					return;
 				}
-				(this.session.researchSlots as Array<Task | null>)[slotIndex] =
-					null;
+				(this.session.researchSlots as Array<Task | null>)[slotIndex] = null;
 				this.abortControllers.delete(taskId);
 				this.tokens.recordResearch(taskId, name, usage);
 				const body = JSON.stringify(result);
 				const MAX = 10_000;
-				const trimmed =
-					body.length > MAX
-						? body.slice(0, MAX) + '\n[...truncated]'
-						: body;
+				const trimmed = body.length > MAX ? body.slice(0, MAX) + '\n[...truncated]' : body;
 				const payload = `[research_result: ${name}]\n${trimmed}`;
 				this.gemini.injectContent(payload);
 				this.metrics.researchCompleted++;
@@ -148,13 +140,10 @@ export class TaskManager {
 					this.log.debug('Research error discarded — task was cancelled', { taskId });
 					return;
 				}
-				(this.session.researchSlots as Array<Task | null>)[slotIndex] =
-					null;
+				(this.session.researchSlots as Array<Task | null>)[slotIndex] = null;
 				this.abortControllers.delete(taskId);
 				const error = err instanceof Error ? err : new Error(String(err));
-				this.gemini.injectContent(
-					`[research error] Task "${name}" failed: ${error.message}`
-				);
+				this.gemini.injectContent(`[research error] Task "${name}" failed: ${error.message}`);
 				this.metrics.researchFailed++;
 				this.log.error('Research failed', {
 					taskId,
@@ -165,12 +154,13 @@ export class TaskManager {
 			});
 	}
 
-	dispatchAutomation(
-		name: string,
-		description: string
-	): Record<string, unknown> {
+	dispatchAutomation(name: string, description: string): Record<string, unknown> {
 		if (this.session.automationSlot !== null) {
-			return { status: 'rejected', reason: 'automation_slot_full', free_automation_slots_remaining: 0 };
+			return {
+				status: 'rejected',
+				reason: 'automation_slot_full',
+				free_automation_slots_remaining: 0,
+			};
 		}
 
 		const taskId = uuidv4();
@@ -195,32 +185,22 @@ export class TaskManager {
 		return { taskId, status: 'dispatched', free_automation_slots_remaining: 0 };
 	}
 
-	handleDomSnapshot(
-		msg: Extract<ExtensionMessage, { type: 'dom_snapshot' }>
+	handleAgentObservation(
+		msg: Extract<ExtensionMessage, { type: 'agent_observation' }>
 	): void {
-		const resolve = this.pendingSnapshots.get(msg.taskId);
+		const resolve = this.pendingObservations.get(msg.taskId);
 		if (resolve) {
-			this.pendingSnapshots.delete(msg.taskId);
+			this.pendingObservations.delete(msg.taskId);
 			resolve(msg);
 		}
 	}
 
-	handleActionResult(
-		msg: Extract<ExtensionMessage, { type: 'action_result' }>
+	handleAgentActionResult(
+		msg: Extract<ExtensionMessage, { type: 'agent_action_result' }>
 	): void {
 		const resolve = this.pendingActionResults.get(msg.actionId);
 		if (resolve) {
 			this.pendingActionResults.delete(msg.actionId);
-			resolve(msg);
-		}
-	}
-
-	handleUserActionResult(
-		msg: Extract<ExtensionMessage, { type: 'user_action_result' }>
-	): void {
-		const resolve = this.pendingUserActionResults.get(msg.actionId);
-		if (resolve) {
-			this.pendingUserActionResults.delete(msg.actionId);
 			resolve(msg);
 		}
 	}
@@ -269,134 +249,49 @@ export class TaskManager {
 		});
 	}
 
-	private _requestSnapshot(
+	private _requestObservation(
 		taskId: string
-	): Promise<Extract<ExtensionMessage, { type: 'dom_snapshot' }> | null> {
+	): Promise<Extract<ExtensionMessage, { type: 'agent_observation' }> | null> {
 		this.session.send({
-			type: 'dom_snapshot_request',
+			type: 'agent_observation_request',
 			sessionId: this.session.sessionId,
 			taskId,
-			taskType: 'structure',
 		});
 
 		return new Promise((resolve) => {
-			this.pendingSnapshots.set(taskId, resolve);
+			this.pendingObservations.set(taskId, resolve);
 
 			setTimeout(() => {
-				if (this.pendingSnapshots.has(taskId)) {
-					this.pendingSnapshots.delete(taskId);
+				if (this.pendingObservations.has(taskId)) {
+					this.pendingObservations.delete(taskId);
 					resolve(null);
 				}
-			}, 10_000);
+			}, 15_000);
 		});
-	}
-
-	private _buildIntent(
-		action: WebAction
-	): { ok: true; intent: WebIntent } | { ok: false; error: string } {
-		const { action: verb, element_id, value, direction, amount, text_snippet, key } = action;
-
-		if (verb === 'click') {
-			if (element_id == null) return { ok: false, error: 'click requires a valid element_id (got null)' };
-			if (value != null) return { ok: false, error: `click cannot carry a value (got "${value}"). To enter text use action: "type".` };
-			if (text_snippet != null) return { ok: false, error: 'click cannot carry text_snippet. To select text inside an element use action: "highlight".' };
-			if (direction != null || amount != null) return { ok: false, error: 'click cannot carry direction/amount. To scroll use action: "scroll".' };
-			if (key != null) return { ok: false, error: 'click cannot carry key. To press a keyboard key use action: "press".' };
-			return { ok: true, intent: { action: 'click', element_id } };
-		}
-
-		if (verb === 'type') {
-			if (element_id == null) return { ok: false, error: 'type requires a valid element_id from the map' };
-			if (value == null || value === '') return { ok: false, error: 'type requires a non-empty value string' };
-			if (direction != null || amount != null || text_snippet != null || key != null) return { ok: false, error: 'type cannot carry direction/amount/text_snippet/key' };
-			return { ok: true, intent: { action: 'type', element_id, value } };
-		}
-
-		if (verb === 'scroll') {
-			if (element_id == null) return { ok: false, error: 'scroll requires element_id of a ScrollContainer from the map (use the [N] ScrollContainer entry for the panel you want to scroll — bid, offer, trades, securities grid, etc. each have their own)' };
-			if (direction !== 'up' && direction !== 'down' && direction !== 'left' && direction !== 'right') {
-				return { ok: false, error: `scroll requires direction in {up,down,left,right} (got ${JSON.stringify(direction)})` };
-			}
-			if (amount == null || amount <= 0) return { ok: false, error: 'scroll requires a positive amount (in pixels)' };
-			if (value != null || text_snippet != null || key != null) return { ok: false, error: 'scroll cannot carry value/text_snippet/key' };
-			return { ok: true, intent: { action: 'scroll', element_id, direction, amount } };
-		}
-
-		if (verb === 'highlight') {
-			if (element_id == null) return { ok: false, error: 'highlight requires a valid element_id from the map' };
-			if (text_snippet == null || text_snippet === '') return { ok: false, error: 'highlight requires a non-empty text_snippet to locate' };
-			if (value != null || direction != null || amount != null || key != null) return { ok: false, error: 'highlight cannot carry value/direction/amount/key' };
-			return { ok: true, intent: { action: 'highlight', element_id, text_snippet } };
-		}
-
-		if (verb === 'press') {
-			if (element_id == null) return { ok: false, error: 'press requires a valid element_id to target (the element that should receive the key event — typically the input you just typed into)' };
-			const allowed = ['Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'] as const;
-			if (key == null || !(allowed as readonly string[]).includes(key)) {
-				return { ok: false, error: `press requires key in {${allowed.join(',')}} (got ${JSON.stringify(key)})` };
-			}
-			if (value != null || direction != null || amount != null || text_snippet != null) return { ok: false, error: 'press cannot carry value/direction/amount/text_snippet' };
-			return { ok: true, intent: { action: 'press', element_id, key } };
-		}
-
-		return { ok: false, error: `unknown action verb "${verb}" — must be one of click|type|scroll|highlight|press` };
 	}
 
 	private async _executeAction(
 		taskId: string,
-		action: WebAction
+		action: AgentAction
 	): Promise<{ success: boolean; error?: string }> {
 		const actionId = uuidv4();
 		const sessionId = this.session.sessionId;
 
-		const built = this._buildIntent(action);
-		if (!built.ok) {
-			return { success: false, error: built.error };
-		}
-		const intent = built.intent;
-
-		if (action.isCritical) {
-			this.session.send({
-				type: 'user_action_required',
-				sessionId,
-				actionId,
-				taskId,
-				description: action.description,
-			});
-
-			const userResult = await new Promise<Extract<
-				ExtensionMessage,
-				{ type: 'user_action_result' }
-			> | null>((resolve) => {
-				this.pendingUserActionResults.set(actionId, resolve);
-				setTimeout(() => {
-					if (this.pendingUserActionResults.has(actionId)) {
-						this.pendingUserActionResults.delete(actionId);
-						resolve(null);
-					}
-				}, 120_000);
-			});
-
-			if (!userResult) {
-				return { success: false, error: 'User confirmation timed out' };
-			}
-			if (!userResult.confirmed) {
-				return { success: false, error: 'User declined the action' };
-			}
-		}
-
 		this.session.send({
-			type: 'action',
+			type: 'agent_action',
 			sessionId,
-			actionId,
 			taskId,
-			intent,
-			isCritical: action.isCritical,
+			actionId,
+			action,
 		});
+
+		const timeoutMs = NAV_VARIANTS.has(action.variant)
+			? NAV_ACTION_TIMEOUT_MS
+			: DEFAULT_ACTION_TIMEOUT_MS;
 
 		const result = await new Promise<Extract<
 			ExtensionMessage,
-			{ type: 'action_result' }
+			{ type: 'agent_action_result' }
 		> | null>((resolve) => {
 			this.pendingActionResults.set(actionId, resolve);
 			setTimeout(() => {
@@ -404,31 +299,20 @@ export class TaskManager {
 					this.pendingActionResults.delete(actionId);
 					resolve(null);
 				}
-			}, 15_000);
+			}, timeoutMs);
 		});
 
 		if (!result) {
-			return { success: false, error: 'Action timed out after 15s' };
+			return { success: false, error: `Action timed out after ${timeoutMs / 1000}s` };
 		}
 		return { success: result.success, error: result.error };
-	}
-
-	private _formatStepSummary(history: StepRecord[]): string {
-		if (history.length === 0) return '';
-		const recent = history.slice(-3);
-		return '\nLast steps: ' + recent.map(s => `[${s.step_number}] ${s.action_description} → ${s.outcome}`).join(' | ');
-	}
-
-	private _injectAutomationContext(message: string, history: StepRecord[] = []): void {
-		const stepSummary = this._formatStepSummary(history);
-		this.gemini.injectContent(`${message}${stepSummary}\nautomation_slot_freed: true`);
 	}
 
 	private _runAutomation(task: Task): void {
 		const { taskId, name } = task;
 
-		this._runAutomationLoop(task, []).catch((err: unknown) => {
-			this.pendingSnapshots.delete(taskId);
+		this._runAutomationLoop(task).catch((err: unknown) => {
+			this.pendingObservations.delete(taskId);
 			if (this.session.cancelledTasks.has(taskId)) {
 				this.log.debug('Automation error discarded — task was cancelled', { taskId });
 				return;
@@ -437,7 +321,9 @@ export class TaskManager {
 			this.abortControllers.delete(taskId);
 			const error = err instanceof Error ? err : new Error(String(err));
 			this._sendAutomationEnd(taskId, 'error', error.message);
-			this._injectAutomationContext(`[automation context] Task "${name}" failed: ${error.message}`);
+			this.gemini.injectContent(
+				`[automation context] Task "${name}" failed: ${error.message}\nautomation_slot_freed: true`
+			);
 			this.metrics.automationFailed++;
 			this.log.error('Automation failed', {
 				taskId,
@@ -448,151 +334,178 @@ export class TaskManager {
 		});
 	}
 
-	private async _runAutomationLoop(
-		task: Task,
-		history: StepRecord[]
-	): Promise<void> {
+	private async _runAutomationLoop(task: Task): Promise<void> {
 		const { taskId, name, description } = task;
 		const MAX_STEPS = 20;
 
-		while (history.length < MAX_STEPS) {
-			if (this.session.cancelledTasks.has(taskId)) {
-				this.session.automationSlot = null;
-				this.abortControllers.delete(taskId);
-				this._sendAutomationEnd(taskId, 'cancelled');
-				this.log.info('Automation cancelled', { taskId, name, durationMs: Date.now() - task.startedAt, steps: history.length });
+		const memory = new WebAgentMemory(description);
+
+		while (memory.stepCount < MAX_STEPS) {
+			if (this._isCancelled(taskId, task, 'before observation', memory.stepCount)) return;
+
+			const obsMsg = await this._requestObservation(taskId);
+
+			if (this._isCancelled(taskId, task, 'after observation', memory.stepCount)) return;
+
+			if (!obsMsg) {
+				this._failAutomation(
+					task,
+					`Observation timed out at step ${memory.stepCount + 1}`,
+					'observation_timeout',
+					memory.stepCount
+				);
 				return;
 			}
 
-			// Single round trip: snapshot returns screenshot + elementMap together
-			const snapshot = await this._requestSnapshot(taskId);
-
-			if (this.session.cancelledTasks.has(taskId)) {
-				this.session.automationSlot = null;
-				this.abortControllers.delete(taskId);
-				this._sendAutomationEnd(taskId, 'cancelled');
-				this.log.info('Automation cancelled', { taskId, name, durationMs: Date.now() - task.startedAt, steps: history.length, after: 'snapshot' });
-				return;
-			}
-
-			if (!snapshot) {
-				this.session.automationSlot = null;
-				this.abortControllers.delete(taskId);
-				const errorMsg = `DOM snapshot timed out at step ${history.length + 1}`;
-				this._sendAutomationEnd(taskId, 'error', errorMsg);
-				this._injectAutomationContext(`[automation context] Task "${name}" failed: ${errorMsg}`, history);
-				this.metrics.automationFailed++;
-				this.log.error('Automation failed', { taskId, name, reason: 'snapshot_timeout', step: history.length + 1, durationMs: Date.now() - task.startedAt });
-				return;
-			}
-
-			const recentHistory = history.slice(-10);
-			const { step, usage } = await webAgentNextStep(description, snapshot.elementMap, snapshot.screenshot, recentHistory);
-			this.tokens.recordAutomationStep(taskId, name, history.length + 1, usage);
-
-			if (this.session.cancelledTasks.has(taskId)) {
-				this.session.automationSlot = null;
-				this.abortControllers.delete(taskId);
-				this._sendAutomationEnd(taskId, 'cancelled');
-				this.log.info('Automation cancelled', { taskId, name, durationMs: Date.now() - task.startedAt, steps: history.length, after: 'agent_step' });
-				return;
-			}
-
-			if (step.is_failed) {
-				this.session.automationSlot = null;
-				this.abortControllers.delete(taskId);
-				const errorMsg = step.reasoning;
-				this._sendAutomationEnd(taskId, 'error', errorMsg);
-				this._injectAutomationContext(`[automation context] Task "${name}" could not be completed after ${history.length} step(s): ${errorMsg}`, history);
-				this.metrics.automationFailed++;
-				this.log.error('Automation failed', { taskId, name, reason: 'agent_declared_failure', step: history.length + 1, reasoning: errorMsg, durationMs: Date.now() - task.startedAt });
-				return;
-			}
-
-			if (step.is_complete) {
-				this.session.automationSlot = null;
-				this.abortControllers.delete(taskId);
-				this._sendAutomationEnd(taskId, 'complete');
-				this._injectAutomationContext(`[automation context] Task "${name}" completed in ${history.length} step(s).`);
-				this.metrics.automationCompleted++;
-				this.log.info('Automation completed', { taskId, name, steps: history.length, durationMs: Date.now() - task.startedAt });
-				return;
-			}
-
-			if (!step.next_action) {
-				this.session.automationSlot = null;
-				this.abortControllers.delete(taskId);
-				this._sendAutomationEnd(taskId, 'error', 'Agent returned no action and did not declare completion');
-				this._injectAutomationContext(`[automation context] Task "${name}" failed: agent returned no action`, history);
-				this.metrics.automationFailed++;
-				this.log.error('Automation failed', { taskId, name, reason: 'agent_returned_no_action', durationMs: Date.now() - task.startedAt });
-				return;
-			}
-
-			const action = step.next_action;
-			const result = await this._executeAction(taskId, action);
-
-			const stepRecord: StepRecord = {
-				step_number: history.length + 1,
-				action_description: action.description,
-				outcome: result.success ? 'succeeded' : 'failed',
-				...(result.success ? {} : { error: result.error ?? 'unknown error' }),
+			const observation: WebObservation = {
+				screenshot: obsMsg.screenshot,
+				width: obsMsg.width,
+				height: obsMsg.height,
+				url: obsMsg.url,
+				title: obsMsg.title,
 			};
-			history.push(stepRecord);
-			this.metrics.automationSteps++;
 
-			this.gemini.injectContent(
-				`[automation context] Task "${name}" step ${stepRecord.step_number}: ${stepRecord.action_description} → ${stepRecord.outcome}`
-			);
+			const { step, usage } = await runWebAgentStep(memory, observation);
+			this.tokens.recordAutomationStep(taskId, name, memory.stepCount + 1, usage);
 
-			this.log.debug('Action executed', {
-				taskId,
-				step: history.length,
-				action: action.action,
-				elementId: action.element_id,
-				success: result.success,
-				error: result.error,
-			});
+			if (this._isCancelled(taskId, task, 'after agent step', memory.stepCount)) return;
 
-			if (this.session.cancelledTasks.has(taskId)) {
-				this.session.automationSlot = null;
-				this.abortControllers.delete(taskId);
-				this._sendAutomationEnd(taskId, 'cancelled');
-				this.log.info('Automation cancelled', { taskId, name, durationMs: Date.now() - task.startedAt, steps: history.length, after: 'action' });
-				return;
-			}
+			const results: AgentActionResult[] = [];
+			let terminal: AgentAction | null = null;
 
-			if (!result.success) {
-				// Don't abort — let agent see the new state and decide
-				this.log.debug('Action failed, agent will decide next step', {
+			for (const action of step.actions) {
+				if (TERMINAL_VARIANTS.has(action.variant)) {
+					terminal = action;
+					break;
+				}
+
+				const result = await this._executeAction(taskId, action);
+				results.push({
+					variant: action.variant,
+					result: result.success ? 'ok' : 'failed',
+					...(result.error ? { error: result.error } : {}),
+				});
+				this.metrics.automationSteps++;
+
+				this.log.debug('Action executed', {
 					taskId,
-					step: history.length,
+					step: memory.stepCount + 1,
+					variant: action.variant,
+					success: result.success,
 					error: result.error,
 				});
+
+				if (this._isCancelled(taskId, task, 'after action', memory.stepCount)) return;
+
+				if (!result.success) {
+					// First failure ends the batch — agent sees the failure next turn.
+					break;
+				}
+			}
+
+			memory.recordTurn(step.reasoning, step.actions, results);
+
+			if (terminal) {
+				this.session.automationSlot = null;
+				this.abortControllers.delete(taskId);
+
+				if (terminal.variant === 'task:done') {
+					this._sendAutomationEnd(taskId, 'complete');
+					this.gemini.injectContent(
+						`[automation context] Task "${name}" completed in ${memory.stepCount} step(s). Evidence: ${
+							terminal.evidence
+						}\nautomation_slot_freed: true`
+					);
+					this.metrics.automationCompleted++;
+					this.log.info('Automation completed', {
+						taskId,
+						name,
+						steps: memory.stepCount,
+						durationMs: Date.now() - task.startedAt,
+					});
+				} else if (terminal.variant === 'task:fail') {
+					this._sendAutomationEnd(taskId, 'error', terminal.reason);
+					this.gemini.injectContent(
+						`[automation context] Task "${name}" could not be completed after ${memory.stepCount} step(s): ${
+							terminal.reason
+						}\nautomation_slot_freed: true`
+					);
+					this.metrics.automationFailed++;
+					this.log.error('Automation failed', {
+						taskId,
+						name,
+						reason: 'agent_declared_failure',
+						step: memory.stepCount,
+						declaredReason: terminal.reason,
+						durationMs: Date.now() - task.startedAt,
+					});
+				}
+				return;
 			}
 		}
 
-		// Exceeded max steps
+		this._failAutomation(
+			task,
+			`Exceeded maximum steps (${MAX_STEPS})`,
+			'max_steps_exceeded',
+			memory.stepCount
+		);
+	}
+
+	private _failAutomation(
+		task: Task,
+		errorMsg: string,
+		reason: string,
+		steps: number
+	): void {
+		const { taskId, name } = task;
 		this.session.automationSlot = null;
 		this.abortControllers.delete(taskId);
-		this._sendAutomationEnd(taskId, 'error', `Exceeded maximum steps (${MAX_STEPS})`);
-		this._injectAutomationContext(`[automation context] Task "${name}" aborted after ${MAX_STEPS} steps without completing`, history);
+		this._sendAutomationEnd(taskId, 'error', errorMsg);
+		this.gemini.injectContent(
+			`[automation context] Task "${name}" failed: ${errorMsg}\nautomation_slot_freed: true`
+		);
 		this.metrics.automationFailed++;
-		this.log.error('Automation failed', { taskId, name, reason: 'max_steps_exceeded', maxSteps: MAX_STEPS, durationMs: Date.now() - task.startedAt });
+		this.log.error('Automation failed', {
+			taskId,
+			name,
+			reason,
+			steps,
+			durationMs: Date.now() - task.startedAt,
+		});
+	}
+
+	private _isCancelled(
+		taskId: string,
+		task: Task,
+		stage: string,
+		steps: number
+	): boolean {
+		if (!this.session.cancelledTasks.has(taskId)) return false;
+		this.session.automationSlot = null;
+		this.abortControllers.delete(taskId);
+		this._sendAutomationEnd(taskId, 'cancelled');
+		this.log.info('Automation cancelled', {
+			taskId,
+			name: task.name,
+			durationMs: Date.now() - task.startedAt,
+			steps,
+			after: stage,
+		});
+		return true;
 	}
 
 	cancel(name: string): Record<string, unknown> {
-		// Find the task by name across all slots
 		const researchSlotIndex = this.session.researchSlots.findIndex(
 			(s) => s?.name === name
 		);
-		const automationMatch = this.session.automationSlot?.name === name
-			? this.session.automationSlot
-			: null;
+		const automationMatch =
+			this.session.automationSlot?.name === name ? this.session.automationSlot : null;
 
-		const task = researchSlotIndex !== -1
-			? this.session.researchSlots[researchSlotIndex]
-			: automationMatch;
+		const task =
+			researchSlotIndex !== -1
+				? this.session.researchSlots[researchSlotIndex]
+				: automationMatch;
 
 		if (!task) {
 			return { status: 'not_found', reason: 'no_running_task_with_that_name' };
@@ -603,26 +516,17 @@ export class TaskManager {
 		this.abortControllers.get(taskId)?.abort();
 		this.abortControllers.delete(taskId);
 
-		// Unblock any pending snapshot — _runAutomation will see cancelledTasks and clean up the slot
-		const snapshotResolve = this.pendingSnapshots.get(taskId);
-		if (snapshotResolve) {
-			this.pendingSnapshots.delete(taskId);
-			snapshotResolve(null);
+		const observationResolve = this.pendingObservations.get(taskId);
+		if (observationResolve) {
+			this.pendingObservations.delete(taskId);
+			observationResolve(null);
 		}
 
-		// Unblock all pending action results (keyed by actionId, not taskId — clear all)
 		for (const [actionId, resolve] of this.pendingActionResults) {
 			resolve(null);
 			this.pendingActionResults.delete(actionId);
 		}
 
-		// Unblock all pending user-action results
-		for (const [actionId, resolve] of this.pendingUserActionResults) {
-			resolve(null);
-			this.pendingUserActionResults.delete(actionId);
-		}
-
-		// Unblock all pending screenshot requests
 		for (const [requestId, resolve] of this.pendingScreenshots) {
 			resolve('');
 			this.pendingScreenshots.delete(requestId);

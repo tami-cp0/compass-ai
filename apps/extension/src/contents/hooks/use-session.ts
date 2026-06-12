@@ -8,12 +8,6 @@ import { player } from "../lib/audio-runtime"
 type StripSessionId<T> = T extends { sessionId: string } ? Omit<T, "sessionId"> : T
 type OutboundExtensionMessage = StripSessionId<ExtensionMessage>
 
-export interface PendingConfirmation {
-  actionId:    string
-  taskId:      string
-  description: string
-}
-
 export type ConnectionStatus = "ok" | "degraded" | "disconnected"
 
 export interface UseSession {
@@ -22,19 +16,17 @@ export interface UseSession {
   // to offline. Used by the UI to keep showing the "in-session" layout.
   wantSession:         boolean
   isAutomationRunning: boolean
-  confirmation:        PendingConfirmation | null
   connectionStatus:    ConnectionStatus
   isOffline:           boolean
   toggle:              () => void
 }
 
 // Orchestrates a Compass voice session: PCM capture lifecycle, background
-// runtime messaging, and the automation / confirmation state surfaced
-// through inbound ServerMessages.
+// runtime messaging, and the automation state surfaced through inbound
+// ServerMessages.
 export function useSession(): UseSession {
   const [active,              setActive]              = useState(false)
   const [isAutomationRunning, setIsAutomationRunning] = useState(false)
-  const [confirmation,        setConfirmation]        = useState<PendingConfirmation | null>(null)
   const [connectionStatus,    setConnectionStatus]    = useState<ConnectionStatus>("ok")
   const [isOffline,           setIsOffline]           = useState(typeof navigator !== "undefined" && !navigator.onLine)
   const [wantSession,         setWantSession]         = useState(false)
@@ -58,21 +50,21 @@ export function useSession(): UseSession {
         player.play(msg.data)
         return false
       }
-      if (msg.type === "action") {
+      // Either an action dispatch or an observation request is enough to
+      // know the agent is actively driving the page.
+      if (msg.type === "agent_action" || msg.type === "agent_observation_request") {
         setIsAutomationRunning(true)
-        return false
-      }
-      if (msg.type === "user_action_required") {
-        setConfirmation({ actionId: msg.actionId, taskId: msg.taskId, description: msg.description })
         return false
       }
       if (msg.type === "automation_end") {
         setIsAutomationRunning(false)
-        setConfirmation(null)
         return false
       }
       if (msg.type === "connection_status") {
         setConnectionStatus(msg.status)
+        // Server can't deliver automation_end through a dead socket, so the
+        // UI would otherwise stay stuck on "automation running" forever.
+        if (msg.status === "disconnected") setIsAutomationRunning(false)
         return false
       }
       return false
@@ -137,5 +129,5 @@ export function useSession(): UseSession {
     }
   }, [isOffline, wantSession, teardownCapture, startSession])
 
-  return { active, wantSession, isAutomationRunning, confirmation, connectionStatus, isOffline, toggle }
+  return { active, wantSession, isAutomationRunning, connectionStatus, isOffline, toggle }
 }

@@ -11,60 +11,32 @@ export type ExtensionMessage = {
     data: string;
     mimeType: "audio/pcm";
 } | {
-    type: "dom_snapshot";
-    sessionId: string;
-    taskId: string;
-    taskType: DomTaskType;
-    screenshot: string;
-    elementMap: string;
-} | {
-    type: "action_result";
-    sessionId: string;
-    actionId: string;
-    taskId: string;
-    success: boolean;
-    error?: string;
-} | {
-    type: "user_action_result";
-    sessionId: string;
-    actionId: string;
-    taskId: string;
-    confirmed: boolean;
-} | {
     type: "screenshot_response";
     sessionId: string;
     requestId: string;
     dataUrl: string;
+} | {
+    type: "agent_observation";
+    sessionId: string;
+    taskId: string;
+    screenshot: string;
+    width: number;
+    height: number;
+    url: string;
+    title: string;
+} | {
+    type: "agent_action_result";
+    sessionId: string;
+    taskId: string;
+    actionId: string;
+    success: boolean;
+    error?: string;
 };
 export type ServerMessage = {
     type: "audio_chunk";
     sessionId: string;
     data: string;
     mimeType: "audio/pcm";
-} | {
-    type: "action";
-    sessionId: string;
-    actionId: string;
-    taskId: string;
-    intent: WebIntent;
-    isCritical: boolean;
-} | {
-    type: "dom_snapshot_request";
-    sessionId: string;
-    taskId: string;
-    taskType: DomTaskType;
-} | {
-    type: "automation_end";
-    sessionId: string;
-    taskId: string;
-    reason: "complete" | "cancelled" | "error";
-    error?: string;
-} | {
-    type: "user_action_required";
-    sessionId: string;
-    actionId: string;
-    taskId: string;
-    description: string;
 } | {
     type: "session_init";
     sessionId: string;
@@ -85,51 +57,90 @@ export type ServerMessage = {
 } | {
     type: "pin_pane_clear";
     sessionId: string;
+} | {
+    type: "agent_observation_request";
+    sessionId: string;
+    taskId: string;
+} | {
+    type: "agent_action";
+    sessionId: string;
+    taskId: string;
+    actionId: string;
+    action: AgentAction;
+} | {
+    type: "automation_end";
+    sessionId: string;
+    taskId: string;
+    reason: "complete" | "cancelled" | "error";
+    error?: string;
 };
-export type DomTaskType = "click" | "form" | "read" | "structure";
-export type PressKey = 'Enter' | 'Tab' | 'Escape' | 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight';
-export interface WebAction {
-    action: 'click' | 'type' | 'scroll' | 'highlight' | 'press';
-    element_id: number | null;
-    value: string | null;
-    direction: 'up' | 'down' | 'left' | 'right' | null;
-    amount: number | null;
-    text_snippet: string | null;
-    key: PressKey | null;
-    isCritical: boolean;
-    description: string;
-}
-export interface WebAgentStep {
-    reasoning: string;
-    next_action: WebAction | null;
-    is_complete: boolean;
-    is_failed: boolean;
-}
-export interface StepRecord {
-    step_number: number;
-    action_description: string;
-    outcome: 'succeeded' | 'failed';
+export type AgentAction = {
+    variant: "mouse:click";
+    x: number;
+    y: number;
+} | {
+    variant: "mouse:double_click";
+    x: number;
+    y: number;
+} | {
+    variant: "mouse:right_click";
+    x: number;
+    y: number;
+} | {
+    variant: "mouse:drag";
+    from: {
+        x: number;
+        y: number;
+    };
+    to: {
+        x: number;
+        y: number;
+    };
+} | {
+    variant: "mouse:scroll";
+    x: number;
+    y: number;
+    deltaX: number;
+    deltaY: number;
+} | {
+    variant: "keyboard:type";
+    content: string;
+} | {
+    variant: "keyboard:enter";
+} | {
+    variant: "keyboard:tab";
+} | {
+    variant: "keyboard:backspace";
+} | {
+    variant: "keyboard:select_all";
+} | {
+    variant: "browser:nav";
+    url: string;
+} | {
+    variant: "browser:nav:back";
+} | {
+    variant: "browser:tab:switch";
+    index: number;
+} | {
+    variant: "browser:tab:new";
+} | {
+    variant: "wait";
+    seconds: number;
+} | {
+    variant: "task:done";
+    evidence: string;
+} | {
+    variant: "task:fail";
+    reason: string;
+};
+export type ActionVariant = AgentAction["variant"];
+export interface AgentActionResult {
+    variant: ActionVariant;
+    result: "ok" | "failed";
     error?: string;
 }
-export type WebIntent = {
-    action: "click";
-    element_id: number;
-} | {
-    action: "type";
-    element_id: number;
-    value: string;
-} | {
-    action: "scroll";
-    element_id: number | null;
-    direction: "up" | "down" | "left" | "right";
-    amount: number;
-} | {
-    action: "highlight";
-    element_id: number;
-    text_snippet: string;
-} | {
-    action: "press";
-    element_id: number;
-    key: PressKey;
-};
+export interface AgentStep {
+    reasoning: string;
+    actions: AgentAction[];
+}
 //# sourceMappingURL=messages.d.ts.map
