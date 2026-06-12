@@ -3,6 +3,12 @@ import type { WebAgentStep, StepRecord } from '@compass-ai/types';
 import { logger } from '../../infra/logger.js';
 import type { TokenUsage } from '../../infra/token-tracker.js';
 import { SYSTEM_PROMPT, WEB_AGENT_SCHEMA } from './web-config.js';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const _dir = dirname(fileURLToPath(import.meta.url));
+const LOGS_DIR = join(_dir, '..', '..', '..', 'logs');
 
 if (!process.env.OPENAI_API_KEY) {
 	throw new Error('OPENAI_API_KEY environment variable is not set');
@@ -24,10 +30,12 @@ function buildHistoryText(history: StepRecord[]): string {
 	return (
 		'Recent steps:\n' +
 		history
-			.map(
-				(s) =>
-					`Step ${s.step_number}: ${s.action_description} → ${s.outcome}`
-			)
+			.map((s) => {
+				const base = `Step ${s.step_number}: ${s.action_description} → ${s.outcome}`;
+				return s.outcome === 'failed' && s.error
+					? `${base} (${s.error})`
+					: base;
+			})
 			.join('\n') +
 		'\n\n'
 	);
@@ -40,6 +48,21 @@ export async function webAgentNextStep(
 	history: StepRecord[]
 ): Promise<{ step: WebAgentStep; usage: TokenUsage }> {
 	const historyText = buildHistoryText(history);
+	const stepNumber = history.length + 1;
+
+	try {
+		mkdirSync(LOGS_DIR, { recursive: true });
+		const base64Data = screenshot.replace(/^data:image\/\w+;base64,/, "");
+		const buffer = Buffer.from(base64Data, 'base64');
+		const filename = `debug_screenshot_${Date.now()}_step${stepNumber}.png`;
+		writeFileSync(join(LOGS_DIR, filename), buffer);
+		logger.info(`[compass] Saved debug screenshot to ${filename}`);
+	} catch (e) {
+		logger.error('[compass] Failed to save debug screenshot', { err: e instanceof Error ? e.message : String(e) });
+	}
+
+	logger.info(`[compass] Executing WebAgent Step ${stepNumber} for task: ${task.slice(0, 100)}...`);
+	logger.info(`[compass] Element map contains ${elementMap.split('\n').length} lines`);
 
 	const response = await openai.responses.create({
 		model: process.env.OPENAI_WEB_MODEL!,
@@ -57,7 +80,7 @@ export async function webAgentNextStep(
 					{
 						type: 'input_image',
 						image_url: screenshot,
-						fidelity: 'high',
+						detail: 'high',
 					},
 					{
 						type: 'input_text',
@@ -70,18 +93,18 @@ export async function webAgentNextStep(
 		text: { format: WEB_AGENT_SCHEMA },
 	});
 
-	const outputText = response.output
+	const lastMessageBlock = response.output
 		.filter((block) => block.type === 'message')
-		.flatMap((block) => {
-			if (block.type !== 'message') return [];
-			return block.content
-				.filter(
-					(c): c is Extract<typeof c, { type: 'output_text' }> =>
-						c.type === 'output_text'
-				)
-				.map((c) => c.text);
-		})
-		.join('');
+		.pop();
+
+	const outputText = lastMessageBlock && lastMessageBlock.type === 'message'
+		? lastMessageBlock.content
+				.filter((c): c is Extract<typeof c, { type: 'output_text' }> => c.type === 'output_text')
+				.map((c) => c.text)
+				.join('')
+		: '';
+
+	logger.info(`[compass] WebAgent raw output: ${outputText}`);
 
 	if (!outputText) throw new Error('WebAgent returned empty output');
 

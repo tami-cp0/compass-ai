@@ -17,14 +17,13 @@ export const elementRegistry = new Map<string, Map<number, Element>>()
 // all async operations so captureVisibleTab and WebSocket sends always complete.
 let relayPort: chrome.runtime.Port
 
-let screenshotResolve: ((dataUrl: string) => void) | null = null
+let screenshotResolvers: Array<(dataUrl: string) => void> = []
 
 function connectRelayPort(): void {
   relayPort = chrome.runtime.connect({ name: "compass-relay" })
   relayPort.onMessage.addListener((msg: { type: string; dataUrl?: string }) => {
-    if (msg.type === "capture_screenshot_response" && screenshotResolve) {
-      const resolve = screenshotResolve
-      screenshotResolve = null
+    if (msg.type === "capture_screenshot_response" && screenshotResolvers.length > 0) {
+      const resolve = screenshotResolvers.shift()!
       resolve(msg.dataUrl ?? "")
     }
   })
@@ -37,7 +36,13 @@ function connectRelayPort(): void {
 connectRelayPort()
 
 function relayToBackground(message: OutboundMessage): void {
-  relayPort.postMessage(message)
+  try {
+    relayPort.postMessage(message)
+  } catch (err) {
+    console.warn("[compass] relayPort disconnected, reconnecting...", err)
+    connectRelayPort()
+    relayPort.postMessage(message)
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg: ServerMessage) => {
@@ -68,7 +73,7 @@ chrome.runtime.onMessage.addListener((msg: ServerMessage) => {
     return false
   }
   if (msg.type === "screenshot_request") {
-    captureScreenshot()
+    captureScreenshot("gemini")
       .then((dataUrl) => {
         relayToBackground({ type: "screenshot_response", requestId: msg.requestId, dataUrl })
       })
@@ -111,10 +116,18 @@ function syntheticClick(el: HTMLElement): void {
   el.dispatchEvent(new MouseEvent("click", opts))
 }
 
+function describeRegistryRange(registry: Map<number, Element>): string {
+  const ids = Array.from(registry.keys())
+  if (ids.length === 0) return "registry is empty"
+  const min = Math.min(...ids)
+  const max = Math.max(...ids)
+  return `current map only contains element IDs ${min}–${max} (${ids.length} entries) — do not invent IDs outside this range`
+}
+
 async function executeIntent(intent: WebIntent, registry: Map<number, Element>): Promise<void> {
   if (intent.action === "click") {
     let el = registry.get(intent.element_id)
-    if (!el) throw new Error(`Element ID ${intent.element_id} not found`)
+    if (!el) throw new Error(`Element ID ${intent.element_id} not found — ${describeRegistryRange(registry)}`)
     
     // Dijit / Virtual DOM fallback: re-query by ID to ensure the node isn't detached or recycled
     if (el.id) {
@@ -132,7 +145,7 @@ async function executeIntent(intent: WebIntent, registry: Map<number, Element>):
 
   if (intent.action === "type") {
     let el = registry.get(intent.element_id)
-    if (!el) throw new Error(`Element ID ${intent.element_id} not found`)
+    if (!el) throw new Error(`Element ID ${intent.element_id} not found — ${describeRegistryRange(registry)}`)
     
     if (el.id) {
       const liveEl = document.getElementById(el.id)
@@ -152,25 +165,77 @@ async function executeIntent(intent: WebIntent, registry: Map<number, Element>):
   }
 
   if (intent.action === "scroll") {
-    if (intent.element_id === null) {
-      window.scrollBy({
-        top:      intent.direction === "down" ? intent.amount : -intent.amount,
-        behavior: "smooth",
-      })
-      return
+    if (intent.element_id == null) {
+      throw new Error("scroll requires an element_id (a ScrollContainer from the map)")
     }
     const el = registry.get(intent.element_id)
-    if (!el) throw new Error(`Element ID ${intent.element_id} not found`)
+    if (!el) throw new Error(`Element ID ${intent.element_id} not found — ${describeRegistryRange(registry)}`)
+
+    const axis: "v" | "h" =
+      intent.direction === "up" || intent.direction === "down" ? "v" : "h"
+    const sign = intent.direction === "down" || intent.direction === "right" ? 1 : -1
+    const delta = sign * intent.amount
+
     el.scrollBy({
-      top:      intent.direction === "down" ? intent.amount : -intent.amount,
+      ...(axis === "v" ? { top: delta } : { left: delta }),
       behavior: "smooth",
     })
     return
   }
 
+  if (intent.action === "press") {
+    let el = registry.get(intent.element_id)
+    if (!el) throw new Error(`Element ID ${intent.element_id} not found — ${describeRegistryRange(registry)}`)
+    if (el.id) {
+      const liveEl = document.getElementById(el.id)
+      if (liveEl) el = liveEl
+    }
+    el.scrollIntoView({ behavior: "instant", block: "nearest", inline: "nearest" })
+
+    const KEY_META: Record<string, { code: string; keyCode: number }> = {
+      Enter:      { code: "Enter",      keyCode: 13 },
+      Tab:        { code: "Tab",        keyCode:  9 },
+      Escape:     { code: "Escape",     keyCode: 27 },
+      ArrowUp:    { code: "ArrowUp",    keyCode: 38 },
+      ArrowDown:  { code: "ArrowDown",  keyCode: 40 },
+      ArrowLeft:  { code: "ArrowLeft",  keyCode: 37 },
+      ArrowRight: { code: "ArrowRight", keyCode: 39 },
+    }
+    const meta = KEY_META[intent.key]
+    if (!meta) throw new Error(`unsupported key "${intent.key}"`)
+
+    if (typeof (el as HTMLElement).focus === "function") {
+      (el as HTMLElement).focus()
+    }
+
+    const evtInit: KeyboardEventInit = {
+      key: intent.key,
+      code: meta.code,
+      keyCode: meta.keyCode,
+      which: meta.keyCode,
+      bubbles: true,
+      cancelable: true,
+    }
+
+    const down = new KeyboardEvent("keydown", evtInit)
+    el.dispatchEvent(down)
+    // keypress is deprecated but legacy Dijit widgets still listen for it
+    el.dispatchEvent(new KeyboardEvent("keypress", evtInit))
+    el.dispatchEvent(new KeyboardEvent("keyup", evtInit))
+
+    // If Enter on a form input and the form has no JS handler that called preventDefault,
+    // try submitting the form natively as a fallback so "press Enter to submit" works.
+    if (intent.key === "Enter" && !down.defaultPrevented) {
+      if (el instanceof HTMLInputElement && el.form) {
+        el.form.requestSubmit?.()
+      }
+    }
+    return
+  }
+
   if (intent.action === "highlight") {
     const el = registry.get(intent.element_id)
-    if (!el) throw new Error(`Element ID ${intent.element_id} not found`)
+    if (!el) throw new Error(`Element ID ${intent.element_id} not found — ${describeRegistryRange(registry)}`)
     const text = el.textContent ?? ""
     // Remove trailing ellipsis from intent snippet in case it was truncated in the snapshot
     const snippet = intent.text_snippet.endsWith("…") 
@@ -477,6 +542,74 @@ function collectDisplayBlocks(gridSelector: string): Set<Element> {
   return kept
 }
 
+// Build a human-readable descriptor for a ScrollContainer so the agent can
+// tell sibling panels apart (e.g. Bid Qty vs Offer Qty vs Trades vs the
+// securities grid). Includes a context label (closest heading / aria-label /
+// nearest preceding text) and a scroll-position hint.
+function describeScrollContainer(el: HTMLElement): string {
+  // 1) Find a textual identifier in priority order
+  const aria = el.getAttribute("aria-label")?.trim()
+  const labelledBy = el.getAttribute("aria-labelledby")
+  const labelledText = labelledBy
+    ? document.getElementById(labelledBy)?.textContent?.trim()
+    : ""
+
+  let ctx = aria || labelledText || ""
+
+  // Look at the closest section/region/widget ancestor for a heading or caption
+  if (!ctx) {
+    const ancestor = el.closest<HTMLElement>(
+      "section, article, aside, [role=region], [role=tabpanel], .dijitContentPane, .panel, .widget, .card",
+    )
+    if (ancestor) {
+      const heading = ancestor.querySelector<HTMLElement>("h1, h2, h3, h4, h5, h6, caption, legend, [role=heading]")
+      const headingText = heading?.textContent?.trim()
+      if (headingText) ctx = headingText
+    }
+  }
+
+  // Fall back to a column-header signature: many grids put the column titles
+  // immediately above/inside the scroll viewport (e.g. "Bid Qty | Price | Pos/Orders").
+  if (!ctx) {
+    const headerRow = el.querySelector("thead, [role=row]")
+    if (headerRow) {
+      const cells = Array.from(headerRow.querySelectorAll("th, [role=columnheader]"))
+        .map(c => c.textContent?.trim().replace(/\s+/g, " ") ?? "")
+        .filter(Boolean)
+        .slice(0, 4)
+      if (cells.length) ctx = `cols: ${cells.join(" | ")}`
+    }
+  }
+
+  // Fall back to the previous-sibling text (often a small panel title)
+  if (!ctx) {
+    let prev = el.previousElementSibling
+    while (prev && !ctx) {
+      const t = (prev.textContent?.trim().replace(/\s+/g, " ") ?? "").slice(0, 40)
+      if (t.length >= 2 && t.length <= 40) ctx = t
+      prev = prev.previousElementSibling
+    }
+  }
+
+  if (ctx.length > 60) ctx = ctx.slice(0, 60) + "…"
+
+  // 2) Scroll-position hint — tells the agent if there's room to scroll
+  const vMax = el.scrollHeight - el.clientHeight
+  const hMax = el.scrollWidth - el.clientWidth
+  const parts: string[] = []
+  if (vMax > 4) {
+    const pct = Math.round((el.scrollTop / vMax) * 100)
+    parts.push(`v: ${pct}% (room: ↑${el.scrollTop}px ↓${vMax - el.scrollTop}px)`)
+  }
+  if (hMax > 4) {
+    const pct = Math.round((el.scrollLeft / hMax) * 100)
+    parts.push(`h: ${pct}% (room: ←${el.scrollLeft}px →${hMax - el.scrollLeft}px)`)
+  }
+  const pos = parts.length ? ` [${parts.join(", ")}]` : ""
+  const ctxStr = ctx ? ` "${ctx}"` : ""
+  return `${ctxStr}${pos}`.trim() || "(unlabelled)"
+}
+
 function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<Element, number>): string {
   const gridSelector = "table, [role=grid], [role=table]"
   const displayBlocks   = collectDisplayBlocks(gridSelector)
@@ -556,7 +689,7 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
       const disabled = (el as HTMLButtonElement).disabled ? " (Disabled)" : ""
       label = `[${eid}] Button: "${text}"${disabled}`
     } else if (isScrollableContainer(el)) {
-      label = `[${eid}] ScrollContainer`
+      label = `[${eid}] ScrollContainer ${describeScrollContainer(el as HTMLElement)}`
     } else {
       label = `[${eid}] ${tag}: "${text}"`
     }
@@ -589,14 +722,20 @@ function buildHybridTree(registry: Map<number, Element>, inverseRegistry: Map<El
   return visibleEntries.map(e => e.line).join("\n")
 }
 
-async function captureScreenshot(): Promise<string> {
+async function captureScreenshot(target: "gemini" | "openai"): Promise<string> {
   return new Promise((resolve, _reject) => {
-    screenshotResolve = (dataUrl) => resizeScreenshot(dataUrl).then(resolve).catch(() => resolve(""))
-    relayPort.postMessage({ type: "capture_screenshot_request" })
+    screenshotResolvers.push((dataUrl) => resizeScreenshot(dataUrl, target).then(resolve).catch(() => resolve("")))
+    try {
+      relayPort.postMessage({ type: "capture_screenshot_request" })
+    } catch (err) {
+      console.warn("[compass] relayPort disconnected during capture, reconnecting...", err)
+      connectRelayPort()
+      relayPort.postMessage({ type: "capture_screenshot_request" })
+    }
   })
 }
 
-async function resizeScreenshot(dataUrl: string): Promise<string> {
+async function resizeScreenshot(dataUrl: string, target: "gemini" | "openai"): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image()
     img.onerror = () => reject(new Error("Failed to load screenshot for resizing"))
@@ -612,27 +751,55 @@ async function resizeScreenshot(dataUrl: string): Promise<string> {
       const canvas = document.createElement("canvas")
       canvas.width  = width
       canvas.height = height
-      canvas.getContext("2d")!.drawImage(img, 0, 0, width, height)
-      resolve(canvas.toDataURL("image/jpeg", 0.85))
+      
+      const ctx = canvas.getContext("2d")!
+      // Prevent subpixel smudging for crisp OCR
+      ctx.imageSmoothingEnabled = false;
+      (ctx as any).mozImageSmoothingEnabled = false;
+      (ctx as any).webkitImageSmoothingEnabled = false;
+      (ctx as any).msImageSmoothingEnabled = false;
+      
+      ctx.drawImage(img, 0, 0, width, height)
+      
+      // Export as lossless PNG
+      const outDataUrl = canvas.toDataURL("image/png")
+      if (target === "gemini") {
+        // Strip data URI prefix for websocket
+        resolve(outDataUrl.split(',')[1])
+      } else {
+        // Keep intact for OpenAI
+        resolve(outDataUrl)
+      }
     }
     img.src = dataUrl
   })
 }
 
 async function handleSnapshotRequest(taskId: string, taskType: DomTaskType): Promise<void> {
-  const { registry, inverseRegistry } = collectInteractables()
-  elementRegistry.set(taskId, registry)
+  try {
+    const { registry, inverseRegistry } = collectInteractables()
+    elementRegistry.set(taskId, registry)
 
-  const elementMap = buildHybridTree(registry, inverseRegistry)
-  console.log(`[compass] snapshot taskId=${taskId} elementCount=${registry.size}`)
-  const screenshot = await captureScreenshot()
+    const elementMap = buildHybridTree(registry, inverseRegistry)
+    console.log(`[compass] snapshot taskId=${taskId} elementCount=${registry.size}`)
+    const screenshot = await captureScreenshot("openai")
 
-  const msg: OutboundMessage = {
-    type:     "dom_snapshot",
-    taskId,
-    taskType,
-    screenshot,
-    elementMap,
+    const msg: OutboundMessage = {
+      type:     "dom_snapshot",
+      taskId,
+      taskType,
+      screenshot,
+      elementMap,
+    }
+    relayToBackground(msg)
+  } catch (err: unknown) {
+    console.error("[compass] handleSnapshotRequest failed:", err)
+    relayToBackground({
+      type:     "dom_snapshot",
+      taskId,
+      taskType,
+      screenshot: "",
+      elementMap: `[ERROR] Failed to capture DOM: ${err instanceof Error ? err.message : String(err)}`,
+    })
   }
-  relayToBackground(msg)
 }

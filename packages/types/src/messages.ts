@@ -24,13 +24,16 @@ export type ServerMessage =
 
 export type DomTaskType = "click" | "form" | "read" | "structure"
 
+export type PressKey = 'Enter' | 'Tab' | 'Escape' | 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight'
+
 export interface WebAction {
-  action: 'click' | 'type' | 'scroll' | 'highlight'
+  action: 'click' | 'type' | 'scroll' | 'highlight' | 'press'
   element_id: number | null
   value: string | null
   direction: 'up' | 'down' | 'left' | 'right' | null
   amount: number | null
   text_snippet: string | null
+  key: PressKey | null
   isCritical: boolean
   description: string
 }
@@ -46,6 +49,7 @@ export interface StepRecord {
   step_number: number
   action_description: string
   outcome: 'succeeded' | 'failed'
+  error?: string
 }
 
 export type WebIntent =
@@ -53,3 +57,4 @@ export type WebIntent =
   | { action: "type"; element_id: number; value: string }
   | { action: "scroll"; element_id: number | null; direction: "up" | "down" | "left" | "right"; amount: number }
   | { action: "highlight"; element_id: number; text_snippet: string }
+  | { action: "press"; element_id: number; key: PressKey }

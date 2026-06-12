@@ -26,7 +26,11 @@ export class GeminiLiveSession {
 
 	// Tool call handlers — wired by TaskManager in Phase 6
 	onDispatchResearch:
-		| ((name: string, description: string) => Record<string, unknown>)
+		| ((
+				name: string,
+				description: string,
+				profile: 'stock_analysis' | 'general_research'
+		  ) => Record<string, unknown>)
 		| null = null;
 	onDispatchAutomation:
 		| ((name: string, description: string) => Record<string, unknown>)
@@ -288,7 +292,8 @@ export class GeminiLiveSession {
 				) {
 					result = this.onDispatchResearch(
 						args.name as string,
-						args.description as string
+						args.description as string,
+						args.profile as 'stock_analysis' | 'general_research'
 					);
 				} else if (
 					call.name === 'dispatch_automation' &&

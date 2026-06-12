@@ -109,6 +109,54 @@ class MarkdownErrorBoundary extends Component<
   }
 }
 
+// Normalize markdown before passing to react-markdown 8 / remark-gfm 3, which
+// crash on a handful of input patterns (most often inside GFM tables). This
+// pre-pass targets the specific shapes that have caused boundary fallbacks:
+//   1. CRLF/CR line endings (parser quirks at boundaries)
+//   2. BOM and zero-width characters that produce empty AST text nodes
+//   3. Trailing whitespace on table rows
+//   4. Separator rows whose column count doesn't match the header row
+//   5. Tab characters inside cells (treated inconsistently)
+const sanitizeMarkdown = (raw: string): string => {
+  // 1) line endings
+  let s = raw.replace(/\r\n?/g, "\n")
+  // 2) strip BOM + zero-width chars
+  s = s.replace(/[﻿​‌‍⁠]/g, "")
+  // Per-line cleanup
+  const lines = s.split("\n").map((line) => {
+    // Tabs → spaces inside table rows (and generally — react-markdown handles
+    // them but remark-gfm's table builder has been observed to choke).
+    if (line.includes("|")) line = line.replace(/\t/g, "    ")
+    // Trim trailing whitespace (the most common table crash trigger).
+    return line.replace(/[ \t]+$/, "")
+  })
+  // 3) Table-aware fixup. Walk in groups of consecutive `|`-containing lines.
+  const SEP_CELL = /^\s*:?-{1,}:?\s*$/
+  const splitRow = (row: string): string[] => {
+    // Drop one leading/trailing pipe if present, then split on unescaped pipes.
+    let r = row.trim()
+    if (r.startsWith("|")) r = r.slice(1)
+    if (r.endsWith("|")) r = r.slice(0, -1)
+    return r.split(/(?<!\\)\|/)
+  }
+  for (let i = 0; i < lines.length - 1; i++) {
+    const header = lines[i]
+    const sep    = lines[i + 1]
+    if (!header.includes("|") || !sep.includes("|")) continue
+    const sepCells = splitRow(sep).map((c) => c.trim())
+    if (sepCells.length === 0 || !sepCells.every((c) => SEP_CELL.test(c))) continue
+    // Unconditionally rebuild the separator row to plain `---` cells matching
+    // the header's column count. This serves two purposes:
+    //   - Strips alignment markers (`:---`, `---:`, `:---:`) which crash
+    //     react-markdown 8 + remark-gfm 3 in addProperty.
+    //   - Repairs mismatched column counts between header and separator.
+    const headerCells = splitRow(header)
+    const repaired = headerCells.map(() => "---").join(" | ")
+    lines[i + 1] = `| ${repaired} |`
+  }
+  return lines.join("\n")
+}
+
 const MarkdownBody = ({ markdown }: { markdown: string }) => (
   <ReactMarkdown
     remarkPlugins={[remarkGfm]}
@@ -131,7 +179,7 @@ const MarkdownBody = ({ markdown }: { markdown: string }) => (
       hr:         ({ node, ...props }) => <hr className="pp-hr" {...props} />,
       a:          ({ node, ...props }) => <a className="pp-a" target="_blank" rel="noreferrer" {...props} />,
     } as never}>
-    {markdown}
+    {sanitizeMarkdown(markdown)}
   </ReactMarkdown>
 )
 

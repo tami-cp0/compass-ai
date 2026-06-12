@@ -200,6 +200,7 @@ function scheduleReconnect() {
     // connectionStatus is already "disconnected"; pill UI handles this state.
     // Future reconnection only happens when the user clicks the pill again,
     // which triggers session_start → sendRaw → connect() kick.
+    broadcastToAllTabs({ type: "pin_pane_clear", sessionId: "" })
     return
   }
 
@@ -273,6 +274,7 @@ chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage, sender,
   // there would leave sessionTabId null and silently drop every server reply.
   if (message.type === "session_end") {
     sessionTabId = null
+    broadcastToAllTabs({ type: "pin_pane_clear", sessionId: sessionId || "" })
   } else if (sender.tab?.id !== undefined && sessionTabId === null) {
     sessionTabId = sender.tab.id
   }

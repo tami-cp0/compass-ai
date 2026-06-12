@@ -8,7 +8,6 @@ import type {
 	WebIntent,
 } from '@compass-ai/types';
 import type { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
-import { getConversationHistory } from '../infra/redis.js';
 import { runResearchAgent } from '../agents/research/research-agent.js';
 import { webAgentNextStep } from '../agents/web/web-agent.js';
 import { sessionLogger, type Logger } from '../infra/logger.js';
@@ -73,7 +72,8 @@ export class TaskManager {
 
 	dispatchResearch(
 		name: string,
-		description: string
+		description: string,
+		profile: 'stock_analysis' | 'general_research'
 	): Record<string, unknown> {
 		const slotIndex = this.session.researchSlots.findIndex(
 			(s) => s === null
@@ -97,9 +97,9 @@ export class TaskManager {
 		this.abortControllers.set(taskId, controller);
 
 		this.metrics.researchDispatched++;
-		this.log.info('Research dispatched', { taskId, name });
+		this.log.info('Research dispatched', { taskId, name, profile });
 
-		this._runResearch(task, slotIndex, controller.signal);
+		this._runResearch(task, slotIndex, profile, controller.signal);
 
 		return {
 			taskId,
@@ -111,24 +111,12 @@ export class TaskManager {
 	private _runResearch(
 		task: Task,
 		slotIndex: number,
+		profile: 'stock_analysis' | 'general_research',
 		signal: AbortSignal
 	): void {
 		const { taskId, name, description } = task;
-		const sessionId = this.session.sessionId;
 
-		getConversationHistory(sessionId)
-			.then((history) => {
-				const context = history.recentTurns
-					.slice(-3)
-					.map(
-						(t) =>
-							`${t.role === 'user' ? 'User' : 'Compass'}: ${
-								t.content
-							}`
-					)
-					.join('\n');
-				return runResearchAgent(description, context, signal);
-			})
+		runResearchAgent(profile, description, signal)
 			.then(({ result, usage }) => {
 				if (this.session.cancelledTasks.has(taskId)) {
 					this.log.debug('Research result discarded — task was cancelled', { taskId });
@@ -303,45 +291,55 @@ export class TaskManager {
 		});
 	}
 
-	private _buildIntent(action: WebAction): WebIntent | null {
-		if (action.action === 'click' && action.element_id != null) {
-			return { action: 'click', element_id: action.element_id };
+	private _buildIntent(
+		action: WebAction
+	): { ok: true; intent: WebIntent } | { ok: false; error: string } {
+		const { action: verb, element_id, value, direction, amount, text_snippet, key } = action;
+
+		if (verb === 'click') {
+			if (element_id == null) return { ok: false, error: 'click requires a valid element_id (got null)' };
+			if (value != null) return { ok: false, error: `click cannot carry a value (got "${value}"). To enter text use action: "type".` };
+			if (text_snippet != null) return { ok: false, error: 'click cannot carry text_snippet. To select text inside an element use action: "highlight".' };
+			if (direction != null || amount != null) return { ok: false, error: 'click cannot carry direction/amount. To scroll use action: "scroll".' };
+			if (key != null) return { ok: false, error: 'click cannot carry key. To press a keyboard key use action: "press".' };
+			return { ok: true, intent: { action: 'click', element_id } };
 		}
-		if (
-			action.action === 'type' &&
-			action.element_id != null &&
-			action.value != null
-		) {
-			return {
-				action: 'type',
-				element_id: action.element_id,
-				value: action.value,
-			};
+
+		if (verb === 'type') {
+			if (element_id == null) return { ok: false, error: 'type requires a valid element_id from the map' };
+			if (value == null || value === '') return { ok: false, error: 'type requires a non-empty value string' };
+			if (direction != null || amount != null || text_snippet != null || key != null) return { ok: false, error: 'type cannot carry direction/amount/text_snippet/key' };
+			return { ok: true, intent: { action: 'type', element_id, value } };
 		}
-		if (
-			action.action === 'scroll' &&
-			(action.direction === 'up' || action.direction === 'down' || action.direction === 'left' || action.direction === 'right') &&
-			action.amount != null
-		) {
-			return {
-				action: 'scroll',
-				element_id: action.element_id ?? null,
-				direction: action.direction as 'up' | 'down' | 'left' | 'right',
-				amount: action.amount,
-			};
+
+		if (verb === 'scroll') {
+			if (element_id == null) return { ok: false, error: 'scroll requires element_id of a ScrollContainer from the map (use the [N] ScrollContainer entry for the panel you want to scroll — bid, offer, trades, securities grid, etc. each have their own)' };
+			if (direction !== 'up' && direction !== 'down' && direction !== 'left' && direction !== 'right') {
+				return { ok: false, error: `scroll requires direction in {up,down,left,right} (got ${JSON.stringify(direction)})` };
+			}
+			if (amount == null || amount <= 0) return { ok: false, error: 'scroll requires a positive amount (in pixels)' };
+			if (value != null || text_snippet != null || key != null) return { ok: false, error: 'scroll cannot carry value/text_snippet/key' };
+			return { ok: true, intent: { action: 'scroll', element_id, direction, amount } };
 		}
-		if (
-			action.action === 'highlight' &&
-			action.element_id != null &&
-			action.text_snippet != null
-		) {
-			return {
-				action: 'highlight',
-				element_id: action.element_id,
-				text_snippet: action.text_snippet,
-			};
+
+		if (verb === 'highlight') {
+			if (element_id == null) return { ok: false, error: 'highlight requires a valid element_id from the map' };
+			if (text_snippet == null || text_snippet === '') return { ok: false, error: 'highlight requires a non-empty text_snippet to locate' };
+			if (value != null || direction != null || amount != null || key != null) return { ok: false, error: 'highlight cannot carry value/direction/amount/key' };
+			return { ok: true, intent: { action: 'highlight', element_id, text_snippet } };
 		}
-		return null;
+
+		if (verb === 'press') {
+			if (element_id == null) return { ok: false, error: 'press requires a valid element_id to target (the element that should receive the key event — typically the input you just typed into)' };
+			const allowed = ['Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'] as const;
+			if (key == null || !(allowed as readonly string[]).includes(key)) {
+				return { ok: false, error: `press requires key in {${allowed.join(',')}} (got ${JSON.stringify(key)})` };
+			}
+			if (value != null || direction != null || amount != null || text_snippet != null) return { ok: false, error: 'press cannot carry value/direction/amount/text_snippet' };
+			return { ok: true, intent: { action: 'press', element_id, key } };
+		}
+
+		return { ok: false, error: `unknown action verb "${verb}" — must be one of click|type|scroll|highlight|press` };
 	}
 
 	private async _executeAction(
@@ -351,13 +349,11 @@ export class TaskManager {
 		const actionId = uuidv4();
 		const sessionId = this.session.sessionId;
 
-		const intent = this._buildIntent(action);
-		if (!intent) {
-			return {
-				success: false,
-				error: `Cannot build intent for action "${action.action}" — missing required fields`,
-			};
+		const built = this._buildIntent(action);
+		if (!built.ok) {
+			return { success: false, error: built.error };
 		}
+		const intent = built.intent;
 
 		if (action.isCritical) {
 			this.session.send({
@@ -540,6 +536,7 @@ export class TaskManager {
 				step_number: history.length + 1,
 				action_description: action.description,
 				outcome: result.success ? 'succeeded' : 'failed',
+				...(result.success ? {} : { error: result.error ?? 'unknown error' }),
 			};
 			history.push(stepRecord);
 			this.metrics.automationSteps++;

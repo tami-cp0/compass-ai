@@ -142,8 +142,8 @@ export function startServer(): us_listen_socket | false {
 				const taskManager = new TaskManager(session, gemini);
 				apiSessions.set(sessionId, { sessionId, gemini, taskManager, startedAt: Date.now() });
 
-				gemini.onDispatchResearch = (name, desc) =>
-					taskManager.dispatchResearch(name, desc);
+				gemini.onDispatchResearch = (name, desc, profile) =>
+					taskManager.dispatchResearch(name, desc, profile);
 				gemini.onDispatchAutomation = (name, desc) =>
 					taskManager.dispatchAutomation(name, desc);
 				gemini.onCancelTask = (name) => taskManager.cancel(name);
