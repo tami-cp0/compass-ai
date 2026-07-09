@@ -80,6 +80,41 @@ function similarity(a: string, b: string): number {
 //
 // Designed to be called from a tool handler so the orchestrating model can
 // verify a heard ticker before committing to expensive research.
+// Distinct sector and sub-sector names (official NGX taxonomy), all valid
+// targets for sector-mode lookups — users say "insurance" (a sub-sector) as
+// readily as "consumer goods" (a sector).
+const SECTORS = [...new Set(NGX_EQUITIES.map((e) => e.sector))];
+const SUB_SECTORS = [...new Set(NGX_EQUITIES.flatMap((e) => (e.subSector ? [e.subSector] : [])))];
+const SECTOR_NAMES = [...SECTORS, ...SUB_SECTORS];
+
+// Look up all companies in a sector or sub-sector by (fuzzy) name. On a miss
+// the response carries the full list so the caller can map its term and retry.
+export function lookupSector(
+	query: string
+): LookupResult & { sector?: string; available_sectors?: string[] } {
+	const qNorm = normalize(query);
+	if (!qNorm) return { matches: [], confidence: 'none', available_sectors: SECTOR_NAMES };
+	let best: { name: string; score: number } | null = null;
+	for (const s of SECTOR_NAMES) {
+		const sNorm = normalize(s);
+		// Token-level substring: "oil" should hit "Oil and Gas", "estate" should
+		// hit "Construction/Real Estate".
+		const tokens = tokenize(s);
+		const tokenHit = tokens.some((t) => t.includes(qNorm) || qNorm.includes(t));
+		const score = sNorm.includes(qNorm) || qNorm.includes(sNorm) || tokenHit
+			? 0.9
+			: similarity(qNorm, sNorm);
+		if (score >= 0.6 && (!best || score > best.score)) best = { name: s, score };
+	}
+	if (!best) return { matches: [], confidence: 'none', available_sectors: SECTOR_NAMES };
+	const { name, score } = best;
+	return {
+		sector: name,
+		matches: NGX_EQUITIES.filter((e) => e.sector === name || e.subSector === name),
+		confidence: score >= 0.85 ? 'exact' : 'fuzzy',
+	};
+}
+
 export function lookupTicker(query: string, limit = 5): LookupResult {
 	const normQ = normalize(query);
 	if (!normQ) return { matches: [], confidence: 'none' };

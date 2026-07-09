@@ -33,20 +33,48 @@ export interface DynamicContext {
 	macro_regulatory_updates: string[];
 }
 
+// A primary source worth handing to the user: the actual document/page the
+// research centers on, not every page the search touched. Kept sparse by the
+// prompt's relevance gate.
+export interface ResearchSource {
+	url: string;
+	title: string;
+	platform: string;
+}
+
 export interface StockAnalysisOutput {
 	temporal_validation: TemporalValidation;
 	baseline_metrics: BaselineMetrics;
 	additional_metrics: MetricKeyValuePair[];
 	dynamic_context: DynamicContext;
+	sources: ResearchSource[];
+	// Honesty channel: thin/one-sided/promotional/conflicting coverage gets
+	// flagged here instead of being silently amplified. Null when solid.
+	coverage_notes: string | null;
 }
 
 export interface GeneralResearchOutput {
 	identified_themes: string[];
 	scraped_evidence: string[];
-	sources: string[];
+	sources: ResearchSource[];
+	coverage_notes: string | null;
 }
 
 export type ResearchOutput = StockAnalysisOutput | GeneralResearchOutput;
+
+const sourcesSchema = {
+	type: 'array',
+	items: {
+		type: 'object',
+		properties: {
+			url: { type: 'string' },
+			title: { type: 'string' },
+			platform: { type: 'string' },
+		},
+		required: ['url', 'title', 'platform'],
+		additionalProperties: false,
+	},
+};
 
 const stockAnalysisSchema = {
 	type: 'object',
@@ -113,8 +141,17 @@ const stockAnalysisSchema = {
 			required: ['identified_themes', 'scraped_evidence', 'macro_regulatory_updates'],
 			additionalProperties: false,
 		},
+		sources: sourcesSchema,
+		coverage_notes: { type: ['string', 'null'] },
 	},
-	required: ['temporal_validation', 'baseline_metrics', 'additional_metrics', 'dynamic_context'],
+	required: [
+		'temporal_validation',
+		'baseline_metrics',
+		'additional_metrics',
+		'dynamic_context',
+		'sources',
+		'coverage_notes',
+	],
 	additionalProperties: false,
 };
 
@@ -123,9 +160,10 @@ const generalResearchSchema = {
 	properties: {
 		identified_themes: { type: 'array', items: { type: 'string' } },
 		scraped_evidence: { type: 'array', items: { type: 'string' } },
-		sources: { type: 'array', items: { type: 'string' } },
+		sources: sourcesSchema,
+		coverage_notes: { type: ['string', 'null'] },
 	},
-	required: ['identified_themes', 'scraped_evidence', 'sources'],
+	required: ['identified_themes', 'scraped_evidence', 'sources', 'coverage_notes'],
 	additionalProperties: false,
 };
 
