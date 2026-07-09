@@ -94,6 +94,7 @@ const FRAG_SRC = `
 
     vec2 q = p / max(outerHalf, vec2(1.0));
     float ang = atan(q.y, q.x);
+    // Perimeter coordinate: 0 at bottom-center, 0.5 at top-center (the pill).
     float s = fract(ang / 6.2831853 + 0.25);
 
     // Traveling sine waves around the perimeter — smooth, continuous flow.
@@ -110,23 +111,49 @@ const FRAG_SRC = `
     float outerMask = smoothstep(outerAA, -outerAA, dOuter);
 
     float depth = -dOuter;
-    float swell = u_intro;
 
-    float fullReach = mix(16.0, 48.0, waveNorm) * u_dpr;
-    float reach     = fullReach * swell;
+    // Ignition sweep: light spreads from the top-center (cast by the pill)
+    // down both sides and meets at the bottom; retraction runs in reverse,
+    // draining back into the pill. u_intro drives the sweep front.
+    float dTop = abs(s - 0.5);            // 0 at top-center → 0.5 at bottom
+    float FEATHER = 0.07;
+    float front = u_intro * (0.5 + FEATHER);
+    float local = 1.0 - smoothstep(front - FEATHER, front, dTop);
 
-    float falloff = (reach > 0.0) ? (1.0 - smoothstep(0.0, reach, depth)) : 0.0;
-    falloff = pow(falloff, 1.4);
+    // Corner blooms: light pools in the corners, each breathing gently out
+    // of phase with its neighbours.
+    float corner = pow(abs(q.x * q.y), 2.0);
+    float ph = q.x > 0.0 ? (q.y > 0.0 ? 0.0 : 1.6) : (q.y > 0.0 ? 3.1 : 4.7);
+    float breath = 0.5 + 0.5 * sin(u_time * 0.45 + ph);
+    float cornerBoost = corner * (0.35 + 0.45 * breath);
 
-    float band = outerMask * falloff;
+    // One light field at two falloff depths: a tight body band and a wide,
+    // faint wash beneath it — light bleeding into the page, not painted on.
+    float reach1 = mix(16.0, 48.0, waveNorm) * (1.0 + cornerBoost * 0.5) * u_dpr * local;
+    float band1  = (reach1 > 0.0) ? pow(1.0 - smoothstep(0.0, reach1, depth), 1.4) : 0.0;
+
+    float reach2 = 95.0 * (1.0 + cornerBoost * 0.6) * u_dpr * local;
+    float band2  = (reach2 > 0.0) ? pow(1.0 - smoothstep(0.0, reach2, depth), 2.4) : 0.0;
+
+    float intensity = (band1 + band2 * 0.35) * (1.0 + cornerBoost);
+
+    // Organic grain: slow drifting noise inside the light so the field feels
+    // gaseous rather than mathematically clean.
+    float n = fbm(p * 0.006 / u_dpr + vec2(u_time * 0.12, -u_time * 0.09));
+    intensity *= 0.82 + 0.36 * n;
+
+    // One slow global breath (replaces the old fast per-arc shimmer).
+    intensity *= 0.90 + 0.10 * sin(u_time * 0.5);
+
+    // Bright leading tip on the sweep front while igniting/retracting;
+    // dissolves completely once the field is at rest.
+    float tip = exp(-abs(dTop - front) * 40.0) * (1.0 - u_intro) * u_intro * 4.0;
+    intensity += tip * band1;
 
     float hue = s + u_time * 0.045 + flow1 * 0.06;
     vec3 col = palette(hue);
 
-    float pulse = 0.85 + 0.30 * (0.5 + 0.5 * sin(u_time * 1.4 + s * 12.566));
-    col *= pulse;
-
-    float alpha = clamp(band * swell, 0.0, 1.0);
+    float alpha = clamp(intensity * outerMask, 0.0, 1.0);
     gl_FragColor = vec4(col * alpha, alpha);
   }
 `

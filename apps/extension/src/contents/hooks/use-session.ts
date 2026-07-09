@@ -10,12 +10,19 @@ type OutboundExtensionMessage = StripSessionId<ExtensionMessage>
 
 export type ConnectionStatus = "ok" | "degraded" | "disconnected"
 
+export interface ResearchTask {
+  taskId: string
+  name:   string
+  status: "started" | "completed" | "failed" | "cancelled"
+}
+
 export interface UseSession {
   active:              boolean
   // True when the user wants a session, even if we've torn down capture due
   // to offline. Used by the UI to keep showing the "in-session" layout.
   wantSession:         boolean
   isAutomationRunning: boolean
+  researchTasks:       ResearchTask[]
   connectionStatus:    ConnectionStatus
   isOffline:           boolean
   toggle:              () => void
@@ -27,6 +34,7 @@ export interface UseSession {
 export function useSession(): UseSession {
   const [active,              setActive]              = useState(false)
   const [isAutomationRunning, setIsAutomationRunning] = useState(false)
+  const [researchTasks,       setResearchTasks]       = useState<ResearchTask[]>([])
   const [connectionStatus,    setConnectionStatus]    = useState<ConnectionStatus>("ok")
   const [isOffline,           setIsOffline]           = useState(typeof navigator !== "undefined" && !navigator.onLine)
   const [wantSession,         setWantSession]         = useState(false)
@@ -60,11 +68,31 @@ export function useSession(): UseSession {
         setIsAutomationRunning(false)
         return false
       }
+      if (msg.type === "research_status") {
+        setResearchTasks((prev) => {
+          if (msg.status === "started") {
+            if (prev.some((t) => t.taskId === msg.taskId)) return prev
+            return [...prev, { taskId: msg.taskId, name: msg.name, status: "started" }]
+          }
+          return prev.map((t) => (t.taskId === msg.taskId ? { ...t, status: msg.status } : t))
+        })
+        // End states just fade out (400ms animation), then drop.
+        if (msg.status !== "started") {
+          setTimeout(() => {
+            setResearchTasks((prev) => prev.filter((t) => t.taskId !== msg.taskId))
+          }, 500)
+        }
+        return false
+      }
       if (msg.type === "connection_status") {
         setConnectionStatus(msg.status)
-        // Server can't deliver automation_end through a dead socket, so the
-        // UI would otherwise stay stuck on "automation running" forever.
-        if (msg.status === "disconnected") setIsAutomationRunning(false)
+        // Server can't deliver automation_end or research_status through a
+        // dead socket, so the UI would otherwise stay stuck on running
+        // indicators forever.
+        if (msg.status === "disconnected") {
+          setIsAutomationRunning(false)
+          setResearchTasks([])
+        }
         return false
       }
       return false
@@ -100,6 +128,7 @@ export function useSession(): UseSession {
   // Gemini session and deletes the resumption handle.
   const stopSession = useCallback(() => {
     setWantSession(false)
+    setResearchTasks([])
     chrome.runtime.sendMessage({ type: "session_end" })
     teardownCapture()
   }, [teardownCapture])
@@ -129,5 +158,5 @@ export function useSession(): UseSession {
     }
   }, [isOffline, wantSession, teardownCapture, startSession])
 
-  return { active, wantSession, isAutomationRunning, connectionStatus, isOffline, toggle }
+  return { active, wantSession, isAutomationRunning, researchTasks, connectionStatus, isOffline, toggle }
 }

@@ -23,11 +23,9 @@ const BUFFER_POLL_MS    = 250
 // torn down and the user must click the pill again to start fresh.
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000]
 
-// Screenshots ship at native CSS-pixel resolution (captureVisibleTab returns
-// physical pixels; we resample by 1/dpr exactly once). No further cap — model
-// coords are then 1:1 with what CDP dispatches. Gemini Live (flat 258 tokens
-// at high-res) and GPT-5.4 Mini (saturates at 6 tiles for any 16:9 viewport)
-// both prefer this; resolution doesn't move the needle on cost.
+// Web-agent screenshots ship at CSS-pixel resolution (captureVisibleTab returns
+// physical pixels; we resample by 1/dpr once) so the model's coords map 1:1 to
+// what CDP dispatches.
 
 const DEBUGGER_PROTOCOL_VERSION = "1.3"
 
@@ -52,10 +50,9 @@ type ConnectionStatus = "ok" | "degraded" | "disconnected"
 
 let ws: WebSocket | null = null
 let sessionId: string | null = null
-// The tab that owns the active session. Captured from sender.tab on
-// session_start. chrome.tabs.query({active, currentWindow}) is unreliable
-// from a service worker — focus may be on DevTools or another window when
-// a server message arrives, dropping relays silently.
+// The tab that owns the active session, captured from sender.tab on
+// session_start. chrome.tabs.query({active}) is unreliable from a service
+// worker (focus may be on DevTools/another window), silently dropping relays.
 let sessionTabId: number | null = null
 let attempt = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -206,6 +203,11 @@ function connect() {
       return
     }
 
+    if (msg.type === "page_data_request") {
+      void handlePageDataRequest(msg.requestId, msg.box, msg.physicalPixels)
+      return
+    }
+
     relayToSessionTab(msg)
   }
 
@@ -287,9 +289,8 @@ async function captureFromTab(tabId: number): Promise<CapturedFrame> {
   const canvas = new OffscreenCanvas(vw, vh)
   const ctx = canvas.getContext("2d")
   if (!ctx) throw new Error("Failed to acquire 2D canvas context")
-  // Smoothing on (bilinear/bicubic) — better for non-integer dpr downscales
-  // (e.g. dpr=1.5) than nearest-neighbor. On dpr=1 (no scale) and dpr=2
-  // (integer scale) the setting is effectively a no-op.
+  // Smoothing on — better for non-integer dpr downscales (e.g. 1.5); a no-op
+  // when dpr is 1 or 2.
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = "high"
   ctx.drawImage(sourceBitmap, 0, 0, vw, vh)
@@ -348,19 +349,116 @@ async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary)
 }
 
-// Used by the Gemini Live screenshot tool. Mirrors the existing behavior the
-// content script used to provide. Returns a raw base64 PNG of the active tab.
+// Gemini Live screenshot tool. The live model emits no coordinates, so it skips
+// the CSS-pixel downscale captureFromTab does for the web agent — raw
+// physical-resolution PNG, for maximum detail.
 async function handleGeminiScreenshotRequest(requestId: string): Promise<void> {
   try {
     if (sessionTabId === null) {
       sendRaw({ type: "screenshot_response", requestId, dataUrl: "" })
       return
     }
-    const frame = await captureFromTab(sessionTabId)
-    sendRaw({ type: "screenshot_response", requestId, dataUrl: frame.base64 })
+    const tab = await chrome.tabs.get(sessionTabId)
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })
+    if (!dataUrl) throw new Error("captureVisibleTab returned empty")
+    // Strip the data: prefix — the server/model wants raw base64.
+    const base64 = dataUrl.replace(/^data:image\/png;base64,/, "")
+    sendRaw({ type: "screenshot_response", requestId, dataUrl: base64 })
   } catch (err) {
     console.error("[compass] gemini screenshot failed:", err)
     sendRaw({ type: "screenshot_response", requestId, dataUrl: "" })
+  }
+}
+
+// ─── Page data extraction (read_page_data tool) ──────────────────────────────
+// Returns the exact visible text inside the box the agent drew on its
+// screenshot — nothing off-screen or hidden. The box + viewport are the bound,
+// so the return is naturally the size of what was asked.
+async function handlePageDataRequest(
+  requestId: string,
+  box: { x: number; y: number; width: number; height: number },
+  physicalPixels: boolean,
+): Promise<void> {
+  try {
+    if (sessionTabId === null) throw new Error("no session tab")
+
+    // The box arrives in the caller's screenshot-pixel space. The live agent's
+    // frame is physical resolution, so divide by dpr to reach CSS pixels (what
+    // the DOM/getBoundingClientRect use); the web agent's frame is already CSS.
+    const [dpr] = await readViewport(sessionTabId)
+    const scale = physicalPixels && dpr > 0 ? 1 / dpr : 1
+    const cssBox = {
+      x: box.x * scale,
+      y: box.y * scale,
+      width: box.width * scale,
+      height: box.height * scale,
+    }
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: sessionTabId },
+      // Runs in the page. Collects, in reading order, the text of every text
+      // node whose own rendered rect (via Range) intersects the box and the
+      // viewport — placing each value by where IT sits, not an ancestor's
+      // bounds, so it scopes precisely regardless of framework. The TreeWalker
+      // doesn't enter shadow roots, so Compass's own overlay is excluded.
+      func: (b: { x: number; y: number; width: number; height: number }): string => {
+        const vw = window.innerWidth
+        const vh = window.innerHeight
+        // Clip the box to the viewport — never return off-screen content.
+        const left = Math.max(0, b.x)
+        const top = Math.max(0, b.y)
+        const right = Math.min(vw, b.x + b.width)
+        const bottom = Math.min(vh, b.y + b.height)
+        if (right <= left || bottom <= top) return ""
+
+        const isVisible = (el: Element): boolean => {
+          const s = getComputedStyle(el)
+          if (s.visibility === "hidden" || s.display === "none" || s.opacity === "0") return false
+          return true
+        }
+
+        const picks: Array<{ top: number; left: number; text: string }> = []
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+        let node: Node | null
+        while ((node = walker.nextNode())) {
+          const text = (node.nodeValue ?? "").replace(/\s+/g, " ").trim()
+          if (!text) continue
+          const parent = (node as Text).parentElement
+          if (!parent || !isVisible(parent)) continue
+
+          const range = document.createRange()
+          range.selectNodeContents(node)
+          const r = range.getBoundingClientRect()
+          if (r.width === 0 || r.height === 0) continue
+          // Must intersect the (viewport-clipped) box.
+          if (r.right < left || r.left > right || r.bottom < top || r.top > bottom) continue
+          picks.push({ top: r.top, left: r.left, text })
+        }
+
+        // Reading order: top-to-bottom, then left-to-right within a line band.
+        picks.sort((a, z) => (Math.abs(a.top - z.top) > 4 ? a.top - z.top : a.left - z.left))
+
+        const out: string[] = []
+        for (const p of picks) {
+          if (out.length > 0 && out[out.length - 1] === p.text) continue
+          out.push(p.text)
+        }
+        return out.join("\n")
+      },
+      args: [cssBox],
+    })
+
+    const data = (results[0]?.result as string | undefined) ?? ""
+    sendRaw({ type: "page_data_response", requestId, data, truncated: false })
+  } catch (err) {
+    console.error("[compass] page data extraction failed:", err)
+    sendRaw({
+      type: "page_data_response",
+      requestId,
+      data: "",
+      truncated: false,
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
 }
 
@@ -371,6 +469,7 @@ async function handleObservationRequest(taskId: string): Promise<void> {
     if (sessionTabId === null) throw new Error("no session tab")
     const tab = await chrome.tabs.get(sessionTabId)
     const frame = await captureFromTab(sessionTabId)
+    const scrollRegions = await collectScrollRegions(sessionTabId)
 
     sendRaw({
       type: "agent_observation",
@@ -380,6 +479,7 @@ async function handleObservationRequest(taskId: string): Promise<void> {
       height: frame.height,
       url: tab.url ?? "",
       title: tab.title ?? "",
+      scrollRegions,
     })
   } catch (err) {
     console.error("[compass] observation failed:", err)
@@ -392,6 +492,96 @@ async function handleObservationRequest(taskId: string): Promise<void> {
       url: "",
       title: "",
     })
+  }
+}
+
+// Scrollable regions visible in the viewport with their live scroll state, so
+// the agent knows before scrolling whether a scroll will do anything.
+// Deterministic (scrollHeight vs clientHeight), CSS-pixel coords. [] on failure.
+async function collectScrollRegions(tabId: number): Promise<
+  Array<{
+    x: number; y: number; width: number; height: number
+    canScrollDown: boolean; canScrollUp: boolean
+    canScrollLeft: boolean; canScrollRight: boolean
+    label?: string
+  }>
+> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const vw = window.innerWidth
+        const vh = window.innerHeight
+        const EPS = 2
+        const out: Array<{
+          x: number; y: number; width: number; height: number
+          canScrollDown: boolean; canScrollUp: boolean
+          canScrollLeft: boolean; canScrollRight: boolean
+          label?: string
+        }> = []
+
+        const labelFor = (el: Element): string | undefined => {
+          const aria = el.getAttribute("aria-label")
+          if (aria && aria.trim()) return aria.trim().slice(0, 40)
+          // nearest heading inside
+          const h = el.querySelector("h1,h2,h3,h4,h5,h6,caption,legend,th")
+          const t = (h?.textContent ?? "").trim()
+          return t ? t.slice(0, 40) : undefined
+        }
+
+        const consider = (el: Element, rect: { left: number; top: number; width: number; height: number }, sTop: number, sLeft: number, sH: number, cH: number, sW: number, cW: number) => {
+          const vertical = sH - cH > EPS
+          const horizontal = sW - cW > EPS
+          if (!vertical && !horizontal) return
+          // Must be at least partly on-screen and reasonably sized.
+          if (rect.width < 40 || rect.height < 40) return
+          if (rect.left > vw || rect.top > vh || rect.left + rect.width < 0 || rect.top + rect.height < 0) return
+          out.push({
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            canScrollDown: vertical && sTop + cH < sH - EPS,
+            canScrollUp: vertical && sTop > EPS,
+            canScrollRight: horizontal && sLeft + cW < sW - EPS,
+            canScrollLeft: horizontal && sLeft > EPS,
+            label: el === document.scrollingElement ? "page" : labelFor(el),
+          })
+        }
+
+        // The page itself.
+        const se = document.scrollingElement as HTMLElement | null
+        if (se) {
+          consider(
+            se,
+            { left: 0, top: 0, width: vw, height: vh },
+            se.scrollTop, se.scrollLeft, se.scrollHeight, se.clientHeight, se.scrollWidth, se.clientWidth,
+          )
+        }
+
+        // Inner scrollers with overflow auto/scroll.
+        const all = document.querySelectorAll<HTMLElement>("*")
+        for (let i = 0; i < all.length && out.length < 12; i++) {
+          const el = all[i]
+          if (el === se) continue
+          const cs = getComputedStyle(el)
+          const oy = cs.overflowY
+          const ox = cs.overflowX
+          const scrollableStyle = ["auto", "scroll", "overlay"].includes(oy) || ["auto", "scroll", "overlay"].includes(ox)
+          if (!scrollableStyle) continue
+          const r = el.getBoundingClientRect()
+          consider(
+            el,
+            { left: r.left, top: r.top, width: r.width, height: r.height },
+            el.scrollTop, el.scrollLeft, el.scrollHeight, el.clientHeight, el.scrollWidth, el.clientWidth,
+          )
+        }
+        return out
+      },
+    })
+    return (results[0]?.result as Awaited<ReturnType<typeof collectScrollRegions>>) ?? []
+  } catch {
+    return []
   }
 }
 
@@ -782,55 +972,3 @@ connect()
 
 chrome.runtime.onInstalled.addListener(() => {})
 chrome.runtime.onStartup.addListener(() => {})
-
-// ─── Dev console helpers ─────────────────────────────────────────────────────
-// Exposed on globalThis so they're callable from the service-worker devtools
-// console (chrome://extensions → "service worker" link). Stripped from
-// production builds — server also ignores the debug message when NODE_ENV is
-// "production".
-if (process.env.NODE_ENV !== "production") {
-  type DebugDispatch = (description: string, name?: string) => void
-  type DebugCancel   = (name: string) => void
-
-  const runWebAgent: DebugDispatch = (description, name) => {
-    if (!sessionId) {
-      console.warn(
-        "[compass] __runWebAgent: no active session. Click the pill to start one first.",
-      )
-      return
-    }
-    if (typeof description !== "string" || description.trim().length === 0) {
-      console.warn(
-        '[compass] __runWebAgent: usage __runWebAgent("describe the task", "optional-name")',
-      )
-      return
-    }
-    const taskName = name ?? `console-task-${Date.now()}`
-    sendRaw({ type: "agent_dispatch_debug", name: taskName, description })
-    console.log(
-      `[compass] __runWebAgent → dispatched name="${taskName}" description="${description.slice(0, 80)}"`,
-    )
-  }
-
-  const cancelWebAgent: DebugCancel = (name) => {
-    if (!sessionId) {
-      console.warn("[compass] __cancelWebAgent: no active session.")
-      return
-    }
-    if (typeof name !== "string" || name.length === 0) {
-      console.warn('[compass] __cancelWebAgent: usage __cancelWebAgent("task-name")')
-      return
-    }
-    sendRaw({ type: "agent_cancel_debug", name })
-    console.log(`[compass] __cancelWebAgent → dispatched name="${name}"`)
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(globalThis as any).__runWebAgent = runWebAgent
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(globalThis as any).__cancelWebAgent = cancelWebAgent
-
-  console.log(
-    "[compass] DEV: __runWebAgent(description, name?) and __cancelWebAgent(name) are available in this console",
-  )
-}
