@@ -16,6 +16,13 @@ export type ExtensionMessage = {
     requestId: string;
     dataUrl: string;
 } | {
+    type: "page_data_response";
+    sessionId: string;
+    requestId: string;
+    data: string;
+    truncated: boolean;
+    error?: string;
+} | {
     type: "agent_observation";
     sessionId: string;
     taskId: string;
@@ -24,6 +31,7 @@ export type ExtensionMessage = {
     height: number;
     url: string;
     title: string;
+    scrollRegions?: ScrollRegion[];
 } | {
     type: "agent_action_result";
     sessionId: string;
@@ -45,6 +53,18 @@ export type ServerMessage = {
     sessionId: string;
     requestId: string;
 } | {
+    type: "page_data_request";
+    sessionId: string;
+    requestId: string;
+    box: Box;
+    physicalPixels: boolean;
+} | {
+    type: "research_status";
+    sessionId: string;
+    taskId: string;
+    name: string;
+    status: "started" | "completed" | "failed" | "cancelled";
+} | {
     type: "connection_status";
     status: "ok" | "degraded" | "disconnected";
 } | {
@@ -54,8 +74,13 @@ export type ServerMessage = {
     markdown: string;
     width: number;
     height: number;
+    columns?: number;
+    links?: PaneLink[];
 } | {
     type: "pin_pane_clear";
+    sessionId: string;
+} | {
+    type: "pin_pane_minimize";
     sessionId: string;
 } | {
     type: "agent_observation_request";
@@ -74,6 +99,28 @@ export type ServerMessage = {
     reason: "complete" | "cancelled" | "error";
     error?: string;
 };
+export interface PaneLink {
+    url: string;
+    title: string;
+    platform?: string;
+}
+export interface ScrollRegion {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    canScrollDown: boolean;
+    canScrollUp: boolean;
+    canScrollLeft: boolean;
+    canScrollRight: boolean;
+    label?: string;
+}
+export interface Box {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
 export type AgentAction = {
     variant: "mouse:click";
     x: number;
@@ -127,6 +174,12 @@ export type AgentAction = {
     variant: "wait";
     seconds: number;
 } | {
+    variant: "page:read";
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+} | {
     variant: "task:done";
     evidence: string;
 } | {
@@ -138,9 +191,12 @@ export interface AgentActionResult {
     variant: ActionVariant;
     result: "ok" | "failed";
     error?: string;
+    data?: string;
 }
 export interface AgentStep {
     reasoning: string;
+    progress_note: string;
+    page_changed: boolean;
     actions: AgentAction[];
 }
 //# sourceMappingURL=messages.d.ts.map
