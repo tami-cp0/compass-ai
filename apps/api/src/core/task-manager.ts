@@ -2,11 +2,13 @@ import { v4 as uuidv4 } from 'uuid';
 import type {
 	AgentAction,
 	AgentActionResult,
+	Box,
 	ExtensionMessage,
 	SessionState,
 	Task,
 } from '@compass-ai/types';
 import type { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
+import { HELP_TOPICS } from '../agents/conversation/live-config.js';
 import { runResearchAgent } from '../agents/research/research-agent.js';
 import { runWebAgentStep, type WebObservation } from '../agents/web/web-step.js';
 import { WebAgentMemory } from '../agents/web/web-memory.js';
@@ -49,6 +51,11 @@ export class TaskManager {
 		automationFailed: 0,
 		automationSteps: 0,
 	};
+	// The first research completion pre-injects the pane composition guide as
+	// silent context, so the model can pin a rich result immediately instead of
+	// paying a get_tool_help round trip first. Once per session; get_tool_help
+	// remains the fallback if compression later evicts it.
+	private paneGuideInjected = false;
 	private pendingObservations = new Map<
 		string,
 		(msg: Extract<ExtensionMessage, { type: 'agent_observation' }> | null) => void
@@ -58,6 +65,10 @@ export class TaskManager {
 		(msg: Extract<ExtensionMessage, { type: 'agent_action_result' }> | null) => void
 	>();
 	private pendingScreenshots = new Map<string, (dataUrl: string) => void>();
+	private pendingPageData = new Map<
+		string,
+		(msg: Extract<ExtensionMessage, { type: 'page_data_response' }> | null) => void
+	>();
 
 	constructor(session: SessionState, gemini: GeminiLiveSession) {
 		this.session = session;
@@ -66,6 +77,22 @@ export class TaskManager {
 		this.tokens = new TokenTracker(session.sessionId);
 		gemini.setTokenTracker(this.tokens);
 		gemini.onRequestScreenshot = () => this._requestScreenshot();
+		// Live agent frames are physical-resolution → physicalPixels: true.
+		gemini.onReadPageData = (box) => this._requestPageData(box, true);
+	}
+
+	private _sendResearchStatus(
+		taskId: string,
+		name: string,
+		status: 'started' | 'completed' | 'failed' | 'cancelled'
+	): void {
+		this.session.send({
+			type: 'research_status',
+			sessionId: this.session.sessionId,
+			taskId,
+			name,
+			status,
+		});
 	}
 
 	dispatchResearch(
@@ -94,6 +121,7 @@ export class TaskManager {
 
 		this.metrics.researchDispatched++;
 		this.log.info('Research dispatched', { taskId, name, profile });
+		this._sendResearchStatus(taskId, name, 'started');
 
 		this._runResearch(task, slotIndex, profile, controller.signal);
 
@@ -125,8 +153,17 @@ export class TaskManager {
 				const body = JSON.stringify(result);
 				const MAX = 10_000;
 				const trimmed = body.length > MAX ? body.slice(0, MAX) + '\n[...truncated]' : body;
+				// Pre-inject the pane guide (silent context) ahead of the first
+				// result, so composing a rich pane needs no get_tool_help turn.
+				if (!this.paneGuideInjected) {
+					this.paneGuideInjected = true;
+					this.gemini.injectContent(
+						`[context] Pane composition guide — pre-loaded so you can pin rich results without fetching it. This is the same content as get_tool_help(["set_pin_pane"]); do not fetch it again.\n\n${HELP_TOPICS.set_pin_pane}`
+					);
+				}
 				const payload = `[research_result: ${name}]\nCompleted at: ${nowReadableWAT()}\n${trimmed}`;
-				this.gemini.injectContent(payload);
+				this.gemini.injectContent(payload, { kind: 'result' });
+				this._sendResearchStatus(taskId, name, 'completed');
 				this.metrics.researchCompleted++;
 				this.log.info('Research completed', {
 					taskId,
@@ -145,8 +182,10 @@ export class TaskManager {
 				this.abortControllers.delete(taskId);
 				const error = err instanceof Error ? err : new Error(String(err));
 				this.gemini.injectContent(
-					`[research error] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}`
+					`[research error] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}`,
+					{ kind: 'result' }
 				);
+				this._sendResearchStatus(taskId, name, 'failed');
 				this.metrics.researchFailed++;
 				this.log.error('Research failed', {
 					taskId,
@@ -165,6 +204,11 @@ export class TaskManager {
 				free_automation_slots_remaining: 0,
 			};
 		}
+
+		// Minimize the pane to its puck before the web agent captures the page,
+		// so the pane never covers content in the agent's screenshot. Content is
+		// kept (not cleared) — the user re-opens it by tapping the puck.
+		this.session.send({ type: 'pin_pane_minimize', sessionId: this.session.sessionId });
 
 		const taskId = uuidv4();
 		const task: Task = {
@@ -216,6 +260,44 @@ export class TaskManager {
 			this.pendingScreenshots.delete(msg.requestId);
 			resolve(msg.dataUrl);
 		}
+	}
+
+	handlePageDataResponse(
+		msg: Extract<ExtensionMessage, { type: 'page_data_response' }>
+	): void {
+		const resolve = this.pendingPageData.get(msg.requestId);
+		if (resolve) {
+			this.pendingPageData.delete(msg.requestId);
+			resolve(msg);
+		}
+	}
+
+	// physicalPixels flags whether the box is in physical-resolution screenshot
+	// pixels (the live agent's frame → extension divides by dpr) or CSS pixels
+	// (the web agent's frame → used as-is).
+	private _requestPageData(
+		box: Box,
+		physicalPixels: boolean
+	): Promise<Extract<ExtensionMessage, { type: 'page_data_response' }> | null> {
+		const requestId = uuidv4();
+		this.session.send({
+			type: 'page_data_request',
+			sessionId: this.session.sessionId,
+			requestId,
+			box,
+			physicalPixels,
+		});
+
+		return new Promise((resolve) => {
+			this.pendingPageData.set(requestId, resolve);
+
+			setTimeout(() => {
+				if (this.pendingPageData.has(requestId)) {
+					this.pendingPageData.delete(requestId);
+					resolve(null);
+				}
+			}, 10_000);
+		});
 	}
 
 	private _requestScreenshot(): Promise<string> {
@@ -276,7 +358,19 @@ export class TaskManager {
 	private async _executeAction(
 		taskId: string,
 		action: AgentAction
-	): Promise<{ success: boolean; error?: string }> {
+	): Promise<{ success: boolean; error?: string; data?: string }> {
+		// page:read is not a CDP input — it goes through the box-extraction path.
+		// Web-agent screenshots are CSS pixels, so physicalPixels: false.
+		if (action.variant === 'page:read') {
+			const resp = await this._requestPageData(
+				{ x: action.x, y: action.y, width: action.width, height: action.height },
+				false
+			);
+			if (!resp) return { success: false, error: 'page read timed out' };
+			if (resp.error) return { success: false, error: resp.error };
+			return { success: true, data: resp.data };
+		}
+
 		const actionId = uuidv4();
 		const sessionId = this.session.sessionId;
 
@@ -328,7 +422,8 @@ export class TaskManager {
 			const progressLog = memory.renderProgressLog();
 			const logSegment = progressLog ? `\n${progressLog}` : '';
 			this.gemini.injectContent(
-				`[automation context] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}${logSegment}\nautomation_slot_freed: true`
+				`[automation context] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}${logSegment}\nautomation_slot_freed: true`,
+				{ kind: 'result' }
 			);
 			this.metrics.automationFailed++;
 			this.log.error('Automation failed', {
@@ -368,6 +463,7 @@ export class TaskManager {
 				height: obsMsg.height,
 				url: obsMsg.url,
 				title: obsMsg.title,
+				scrollRegions: obsMsg.scrollRegions,
 			};
 
 			const { step, usage } = await runWebAgentStep(memory, observation);
@@ -389,6 +485,7 @@ export class TaskManager {
 					variant: action.variant,
 					result: result.success ? 'ok' : 'failed',
 					...(result.error ? { error: result.error } : {}),
+					...(result.data !== undefined ? { data: result.data } : {}),
 				});
 				this.metrics.automationSteps++;
 
@@ -408,7 +505,22 @@ export class TaskManager {
 				}
 			}
 
-			memory.recordTurn(step.reasoning, step.progress_note, step.actions, results);
+			memory.recordTurn(step.reasoning, step.progress_note, step.page_changed, step.actions, results);
+
+			// Hard stop for no-progress loops: the notice fires at 2 (see
+			// WebAgentMemory); if the agent repeats the same no-op a 3rd time,
+			// the run is going nowhere — fail it. A terminal action this turn
+			// takes precedence — the agent is ending anyway.
+			if (!terminal && memory.noProgressStreak >= 3) {
+				this._failAutomation(
+					task,
+					memory,
+					'Stuck: 3 consecutive batches produced no page change',
+					'no_progress_loop',
+					memory.stepCount
+				);
+				return;
+			}
 
 			if (terminal) {
 				this.session.automationSlot = null;
@@ -416,10 +528,27 @@ export class TaskManager {
 
 				const progressLog = memory.renderProgressLog();
 
+				// End the run, give the SPA a beat to finish async loads, then put
+				// a FRESH screenshot in front of Gemini before the announcement —
+				// so it reports the current screen, not a stale mid-flight frame.
+				this._sendAutomationEnd(
+					taskId,
+					terminal.variant === 'task:done' ? 'complete' : 'error',
+					terminal.variant === 'task:fail' ? terminal.reason : undefined
+				);
+				await new Promise<void>((r) => setTimeout(r, 2_500));
+				const freshFrame = await this._requestScreenshot();
+				if (freshFrame) this.gemini.sendVideoFrame(freshFrame);
+
 				if (terminal.variant === 'task:done') {
-					this._sendAutomationEnd(taskId, 'complete');
+					// The frame's provenance rides in the message so the model can
+					// reason about it (mid-load capture) instead of trusting it blindly.
+					const frameNote = freshFrame
+						? '\nA screenshot of the end state was just added to your visual context. It was captured moments after the run ended — if it looks blank or still loading, take a fresh one before reporting.'
+						: '';
 					this.gemini.injectContent(
-						`[automation context] Task "${name}" completed in ${memory.stepCount} step(s).\nCompleted at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nEvidence: ${terminal.evidence}\nautomation_slot_freed: true`
+						`[automation context] Task "${name}" completed in ${memory.stepCount} step(s).\nCompleted at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nEvidence: ${terminal.evidence}${frameNote}\nautomation_slot_freed: true`,
+						{ kind: 'result' }
 					);
 					this.metrics.automationCompleted++;
 					this.log.info('Automation completed', {
@@ -429,9 +558,9 @@ export class TaskManager {
 						durationMs: Date.now() - task.startedAt,
 					});
 				} else if (terminal.variant === 'task:fail') {
-					this._sendAutomationEnd(taskId, 'error', terminal.reason);
 					this.gemini.injectContent(
-						`[automation context] Task "${name}" could not be completed after ${memory.stepCount} step(s): ${terminal.reason}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nautomation_slot_freed: true`
+						`[automation context] Task "${name}" could not be completed after ${memory.stepCount} step(s): ${terminal.reason}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nautomation_slot_freed: true`,
+						{ kind: 'result' }
 					);
 					this.metrics.automationFailed++;
 					this.log.error('Automation failed', {
@@ -446,11 +575,9 @@ export class TaskManager {
 				return;
 			}
 
-			// Mid-run heartbeat every 2 completed steps. Silent context only —
-			// Gemini gets the running summary without being prompted to narrate.
-			// Tagged as a heartbeat so successive ticks coalesce in the inject
-			// queue: if the model was speaking through several steps, only the
-			// most recent heartbeat for this task flushes.
+			// Mid-run heartbeat every 2 steps: silent context, tagged so
+			// successive ticks coalesce in the inject queue (only the latest
+			// flushes if the model was speaking through several steps).
 			if (memory.stepCount % 2 === 0) {
 				const recent = memory.recentProgressNotes(2)
 					.map((p) => `Step ${p.stepNumber}: ${p.note}`)
@@ -485,7 +612,8 @@ export class TaskManager {
 		const progressLog = memory.renderProgressLog();
 		const logSegment = progressLog ? `\n${progressLog}` : '';
 		this.gemini.injectContent(
-			`[automation context] Task "${name}" failed: ${errorMsg}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}${logSegment}\nautomation_slot_freed: true`
+			`[automation context] Task "${name}" failed: ${errorMsg}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}${logSegment}\nautomation_slot_freed: true`,
+			{ kind: 'result' }
 		);
 		this.metrics.automationFailed++;
 		this.log.error('Automation failed', {
@@ -506,6 +634,7 @@ export class TaskManager {
 		if (!this.session.cancelledTasks.has(taskId)) return false;
 		this.session.automationSlot = null;
 		this.abortControllers.delete(taskId);
+		this.gemini.clearHeartbeat(`automation:${taskId}`);
 		this._sendAutomationEnd(taskId, 'cancelled');
 		this.log.info('Automation cancelled', {
 			taskId,
@@ -556,6 +685,7 @@ export class TaskManager {
 
 		if (researchSlotIndex !== -1) {
 			(this.session.researchSlots as Array<Task | null>)[researchSlotIndex] = null;
+			this._sendResearchStatus(taskId, name, 'cancelled');
 		}
 
 		this.log.info('Task cancelled', { taskId, name });

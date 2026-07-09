@@ -41,6 +41,18 @@ interface ResearchTask {
 interface LiveUsage {
   totals: TaskTotals
   calls: number
+  // Cumulative cached input tokens Gemini reported (cachedContentTokenCount).
+  cachedInputTokens: number
+  // Per-modality token split (TEXT / AUDIO / IMAGE / VIDEO), summed across turns.
+  inputByModality: Record<string, number>
+  outputByModality: Record<string, number>
+}
+
+// Minimal shape of Gemini's ModalityTokenCount[] — kept local so the tracker
+// doesn't depend on the @google/genai types.
+export interface ModalityTokens {
+  input?: Array<{ modality?: string; tokenCount?: number }>
+  output?: Array<{ modality?: string; tokenCount?: number }>
 }
 
 interface SessionReport {
@@ -62,7 +74,13 @@ function emptyReport(sessionId: string): SessionReport {
     totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, research: 0, automation: 0, live: 0 },
     research: [],
     automation: [],
-    live: { totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, calls: 0 },
+    live: {
+      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      calls: 0,
+      cachedInputTokens: 0,
+      inputByModality: {},
+      outputByModality: {},
+    },
   }
 }
 
@@ -107,12 +125,23 @@ export class TokenTracker {
     this.flush()
   }
 
-  recordLive(usage: TokenUsage): void {
+  recordLive(usage: TokenUsage, modality?: ModalityTokens): void {
     if (!this.enabled) return
     this.report.live.calls++
     this.report.live.totals.inputTokens += usage.inputTokens
     this.report.live.totals.outputTokens += usage.outputTokens
     this.report.live.totals.totalTokens += usage.totalTokens
+    this.report.live.cachedInputTokens += usage.cachedTokens ?? 0
+    for (const d of modality?.input ?? []) {
+      if (!d.modality) continue
+      this.report.live.inputByModality[d.modality] =
+        (this.report.live.inputByModality[d.modality] ?? 0) + (d.tokenCount ?? 0)
+    }
+    for (const d of modality?.output ?? []) {
+      if (!d.modality) continue
+      this.report.live.outputByModality[d.modality] =
+        (this.report.live.outputByModality[d.modality] ?? 0) + (d.tokenCount ?? 0)
+    }
     this.recompute()
     this.flush()
   }

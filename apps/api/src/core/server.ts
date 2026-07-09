@@ -10,6 +10,13 @@ import {
 	getResumptionHandle,
 } from '../infra/redis.js';
 import { TaskManager } from './task-manager.js';
+import { unwrapOuterFence } from './pane-estimate.js';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// apps/api/src/core → apps/api/logs (same convention as web-step.ts)
+const PANE_LOG_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'logs');
 
 if (!process.env.PORT) {
 	throw new Error('PORT environment variable is not set');
@@ -75,7 +82,7 @@ export async function shutdownAllSessions(): Promise<void> {
 export function startServer(): us_listen_socket | false {
 	const app = App();
 
-	app.ws<{ sessionId: string | null }>('/ws', {
+	app.ws<{ sessionId: string | null; closed: boolean }>('/ws', {
 		compression: DISABLED,
 		maxPayloadLength: 16 * 1024 * 1024,
 		idleTimeout: 120,
@@ -88,7 +95,7 @@ export function startServer(): us_listen_socket | false {
 				return;
 			}
 			res.upgrade(
-				{ sessionId: null },
+				{ sessionId: null, closed: false },
 				req.getHeader('sec-websocket-key'),
 				req.getHeader('sec-websocket-protocol'),
 				req.getHeader('sec-websocket-extensions'),
@@ -111,7 +118,18 @@ export function startServer(): us_listen_socket | false {
 				return;
 			}
 
-			const send = (m: ServerMessage) => ws.send(JSON.stringify(m));
+			// The task manager and async tool returns hold this closure beyond the
+			// socket's lifetime; uWS hard-throws on send-after-close (e.g. a page
+			// refresh mid-automation), which took the whole process down. Guard it.
+			const userData = ws.getUserData();
+			const send = (m: ServerMessage) => {
+				if (userData.closed) return;
+				try {
+					ws.send(JSON.stringify(m));
+				} catch {
+					userData.closed = true;
+				}
+			};
 
 			if (msg.type === 'session_start' || msg.type === 'session_resume') {
 				const existing = ws.getUserData().sessionId;
@@ -147,12 +165,47 @@ export function startServer(): us_listen_socket | false {
 				gemini.onDispatchAutomation = (name, desc) =>
 					taskManager.dispatchAutomation(name, desc);
 				gemini.onCancelTask = (name) => taskManager.cancel(name);
-				gemini.onSetPinPane = (title, markdown, width, height) => {
+				gemini.onSetPinPane = (title, rawMarkdown, width, height, columns, links) => {
 					// Server clamps only to absolute sanity limits. The extension
 					// further clamps width at render time to fit between the pill
 					// and the viewport edge.
 					const requestedWidth = Math.max(220, Math.round(width));
-					const appliedHeight = Math.max(120, Math.min(640, Math.round(height)));
+					const appliedHeight = Math.max(120, Math.min(1040, Math.round(height)));
+					// 1 (default) or 2 columns. Two columns roughly halve the
+					// rendered height, so the fit check uses estimate / columns.
+					const appliedColumns = columns === 2 ? 2 : 1;
+					// Link louvers: http(s) only, url+title required, max 3.
+					const appliedLinks = (links ?? [])
+						.filter(
+							(l) =>
+								l &&
+								typeof l.url === 'string' &&
+								/^https?:\/\//i.test(l.url) &&
+								typeof l.title === 'string' &&
+								l.title.trim() !== ''
+						)
+						.slice(0, 3)
+						.map((l) => ({
+							url: l.url,
+							title: l.title.trim(),
+							...(typeof l.platform === 'string' && l.platform.trim() !== ''
+								? { platform: l.platform.trim() }
+								: {}),
+						}));
+
+					// Persist the raw payload verbatim (JSON-escaped) so pane render
+					// bugs are diagnosable after the fact.
+					const markdown = unwrapOuterFence(rawMarkdown);
+					try {
+						mkdirSync(PANE_LOG_DIR, { recursive: true });
+						appendFileSync(
+							join(PANE_LOG_DIR, 'pin-pane.log'),
+							`${new Date().toISOString()} ${sessionId} title=${JSON.stringify(title)} unwrapped=${markdown !== rawMarkdown} markdown=${JSON.stringify(rawMarkdown)}\n`
+						);
+					} catch {
+						// Diagnostics only — never block the pane on log I/O.
+					}
+
 					logger.info('[pin-pane] set_pin_pane called', {
 						sessionId,
 						title,
@@ -167,13 +220,26 @@ export function startServer(): us_listen_socket | false {
 						markdown,
 						width: requestedWidth,
 						height: appliedHeight,
+						columns: appliedColumns,
+						...(appliedLinks.length > 0 ? { links: appliedLinks } : {}),
 					});
-					return { status: 'rendered', appliedWidth: requestedWidth, appliedHeight };
+					return {
+						status: 'rendered',
+						appliedWidth: requestedWidth,
+						appliedHeight,
+						appliedColumns,
+						appliedLinks: appliedLinks.length,
+					};
 				};
 				gemini.onClearPinPane = () => {
 					logger.info('[pin-pane] clear_pin_pane called', { sessionId });
 					send({ type: 'pin_pane_clear', sessionId });
 					return { status: 'cleared' };
+				};
+				gemini.onMinimizePinPane = () => {
+					logger.info('[pin-pane] minimize_pin_pane called', { sessionId });
+					send({ type: 'pin_pane_minimize', sessionId });
+					return { status: 'minimized' };
 				};
 
 				await gemini.connect({ resumeHandle });
@@ -237,23 +303,8 @@ export function startServer(): us_listen_socket | false {
 				return;
 			}
 
-			if (msg.type === 'agent_dispatch_debug') {
-				if (!IS_DEV) {
-					logger.warn('agent_dispatch_debug ignored — not in development mode', { sessionId });
-					return;
-				}
-				const result = apiSession.taskManager.dispatchAutomation(msg.name, msg.description);
-				logger.info('Debug automation dispatched from console', { sessionId, name: msg.name, ...result });
-				return;
-			}
-
-			if (msg.type === 'agent_cancel_debug') {
-				if (!IS_DEV) {
-					logger.warn('agent_cancel_debug ignored — not in development mode', { sessionId });
-					return;
-				}
-				const result = apiSession.taskManager.cancel(msg.name);
-				logger.info('Debug cancel dispatched from console', { sessionId, name: msg.name, ...result });
+			if (msg.type === 'page_data_response') {
+				apiSession.taskManager.handlePageDataResponse(msg);
 				return;
 			}
 
@@ -264,6 +315,7 @@ export function startServer(): us_listen_socket | false {
 		},
 
 		async close(ws, code) {
+			ws.getUserData().closed = true;
 			const sessionId = ws.getUserData().sessionId;
 			if (sessionId) {
 				const apiSession = apiSessions.get(sessionId);
