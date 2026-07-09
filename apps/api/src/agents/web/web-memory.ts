@@ -1,20 +1,30 @@
 import type { AgentAction, AgentActionResult } from '@compass-ai/types';
 
-// Lightweight memory for the web agent loop. Holds the task goal plus a
-// rolling window of recent reasonings and the last screenshot/tab so the
-// model has continuity across turns without paying for the full history.
-//
-// Why this is small: we only have one screenshot per turn, the model is
-// vision-driven, and stuffing more than ~2 screenshots into the context
-// quickly blows the token budget without measurable accuracy gain.
+// Lightweight memory for the web agent loop: the task goal plus a rolling
+// window of recent turns, giving continuity without paying for full history.
+// Kept small because the model is vision-driven and extra screenshots blow the
+// token budget with no accuracy gain.
 
 export interface MemoryTurn {
 	stepNumber: number;
 	reasoning: string;
 	progressNote: string;
+	pageChanged: boolean;
 	actions: AgentAction[];
 	results: AgentActionResult[];
 }
+
+// Variants that can loop without progress: pointer inputs, waiting, scrolling.
+// Typing/navigation are excluded (they legitimately change state). Scrolling is
+// included because a page_changed:false scroll is a genuine no-op; a scroll that
+// reveals content reports page_changed:true and resets the streak.
+const LOOPABLE_VARIANTS = new Set<string>([
+	'mouse:click',
+	'mouse:double_click',
+	'mouse:right_click',
+	'mouse:scroll',
+	'wait',
+]);
 
 export class WebAgentMemory {
 	readonly goal: string;
@@ -31,6 +41,7 @@ export class WebAgentMemory {
 	recordTurn(
 		reasoning: string,
 		progressNote: string,
+		pageChanged: boolean,
 		actions: AgentAction[],
 		results: AgentActionResult[]
 	): void {
@@ -38,9 +49,67 @@ export class WebAgentMemory {
 			stepNumber: this.turns.length + 1,
 			reasoning,
 			progressNote,
+			pageChanged,
 			actions,
 			results,
 		});
+	}
+
+	// Consecutive most-recent turns where the model itself reported no page
+	// change AND the batch that preceded that report was click/wait-only.
+	// The model observes "nothing changed" reliably; this makes the system
+	// act on it instead of trusting the model to break its own loop.
+	get noProgressStreak(): number {
+		let streak = 0;
+		for (let i = this.turns.length - 1; i >= 1; i--) {
+			const turn = this.turns[i];
+			const prev = this.turns[i - 1];
+			const prevClickOnly =
+				prev.actions.length > 0 &&
+				prev.actions.every((a) => LOOPABLE_VARIANTS.has(a.variant));
+			if (!turn.pageChanged && prevClickOnly) streak++;
+			else break;
+		}
+		return streak;
+	}
+
+	// Mechanical circuit-breaker notice for the next prompt. Fires at 2
+	// consecutive no-op batches (one warning); the loop force-fails at 3.
+	// Wording adapts to what the agent was actually repeating — scrolling and
+	// clicking need different corrective advice.
+	noProgressNotice(): string | null {
+		const streak = this.noProgressStreak;
+		if (streak < 2) return null;
+		const recentActions = this.turns.slice(-streak - 1, -1).flatMap((t) => t.actions);
+		const scrolled = recentActions.some((a) => a.variant === 'mouse:scroll');
+		const clicked = recentActions.some(
+			(a) => a.variant === 'mouse:click' || a.variant === 'mouse:double_click'
+		);
+
+		// Scroll-only loop: the target is not below the fold.
+		if (scrolled && !clicked) {
+			return (
+				`NOTICE: Your last ${streak} scroll batches produced NO page change — by your own reports. ` +
+				`You are at the scroll limit or this area does not scroll. The content you are looking for is NOT ` +
+				`below the fold. Either it is ALREADY visible in the current screenshot — if so, read it and finish ` +
+				`the task — or it lives elsewhere (a different panel, tab, or the sidebar navigation). Do NOT scroll ` +
+				`the same way again.`
+			);
+		}
+
+		const clicks = recentActions
+			.filter(
+				(a): a is Extract<AgentAction, { x: number; y: number }> =>
+					a.variant === 'mouse:click' || a.variant === 'mouse:double_click'
+			)
+			.map((a) => `(${a.x}, ${a.y})`)
+			.join(', ');
+		return (
+			`NOTICE: Your last ${streak} click batches${clicks ? ` at ${clicks}` : ''} produced NO page change — ` +
+			`by your own reports. Whatever you are clicking is not interactive or not responding. ` +
+			`Do NOT click there again. Take a different route to the goal: a different control, ` +
+			`the sidebar/menu navigation, or scroll to reveal alternatives.`
+		);
 	}
 
 	// All progress notes, oldest → newest, formatted as "Step N: <note>".
@@ -97,6 +166,8 @@ function renderActionArgs(action: AgentAction): string {
 			return ` (${action.from.x},${action.from.y}) → (${action.to.x},${action.to.y})`;
 		case 'mouse:scroll':
 			return ` @ (${action.x}, ${action.y}) Δ(${action.deltaX}, ${action.deltaY})`;
+		case 'page:read':
+			return ` box(${action.x}, ${action.y}, ${action.width}×${action.height})`;
 		case 'keyboard:type':
 			return ` "${action.content.length > 40 ? action.content.slice(0, 40) + '…' : action.content}"`;
 		case 'browser:nav':

@@ -1,16 +1,10 @@
 import OpenAI from 'openai';
-import { writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import type { AgentAction, AgentStep } from '@compass-ai/types';
+import type { AgentAction, AgentStep, ScrollRegion } from '@compass-ai/types';
 import { logger } from '../../infra/logger.js';
 import type { TokenUsage } from '../../infra/token-tracker.js';
 import { SYSTEM_PROMPT } from './web-prompt.js';
 import { WEB_AGENT_STEP_SCHEMA } from './web-actions.js';
 import type { WebAgentMemory } from './web-memory.js';
-
-const _dir = dirname(fileURLToPath(import.meta.url));
-const LOGS_DIR = join(_dir, '..', '..', '..', 'logs');
 
 if (!process.env.OPENAI_API_KEY) {
 	throw new Error('OPENAI_API_KEY environment variable is not set');
@@ -76,6 +70,28 @@ export interface WebObservation {
 	height: number;
 	url: string;
 	title: string;
+	scrollRegions?: ScrollRegion[];
+}
+
+// Deterministic scroll affordances for the current viewport — the agent must
+// consult these BEFORE scrolling, so it never scrolls a region that cannot move.
+function renderScrollRegions(regions?: ScrollRegion[]): string {
+	if (!regions || regions.length === 0) {
+		return 'Scrollable regions: NONE detected on screen — nothing here scrolls; do not emit mouse:scroll.';
+	}
+	const lines = regions.map((r) => {
+		const dirs = [
+			r.canScrollDown ? 'down' : null,
+			r.canScrollUp ? 'up' : null,
+			r.canScrollLeft ? 'left' : null,
+			r.canScrollRight ? 'right' : null,
+		].filter(Boolean);
+		const where = `(${r.x},${r.y}) ${r.width}×${r.height}`;
+		const name = r.label ? `"${r.label}" ` : '';
+		const can = dirs.length ? `can scroll ${dirs.join('/')}` : 'AT LIMIT — cannot scroll further';
+		return `- ${name}${where}: ${can}`;
+	});
+	return `Scrollable regions (scroll only inside one that "can scroll" the direction you need — target a coordinate inside its box):\n${lines.join('\n')}`;
 }
 
 export async function runWebAgentStep(
@@ -83,19 +99,6 @@ export async function runWebAgentStep(
 	observation: WebObservation
 ): Promise<{ step: AgentStep; usage: TokenUsage }> {
 	const stepNumber = memory.stepCount + 1;
-
-	try {
-		mkdirSync(LOGS_DIR, { recursive: true });
-		const base64Data = observation.screenshot.replace(/^data:image\/\w+;base64,/, '');
-		const buffer = Buffer.from(base64Data, 'base64');
-		const filename = `debug_screenshot_${Date.now()}_step${stepNumber}.png`;
-		writeFileSync(join(LOGS_DIR, filename), buffer);
-		logger.info(`[compass] Saved debug screenshot to ${filename}`);
-	} catch (e) {
-		logger.error('[compass] Failed to save debug screenshot', {
-			err: e instanceof Error ? e.message : String(e),
-		});
-	}
 
 	logger.info(
 		`[compass] WebAgent step ${stepNumber} — goal: ${memory.goal.slice(0, 100)} — url: ${observation.url}`
@@ -113,16 +116,23 @@ export async function runWebAgentStep(
 	let header = `Task: ${memory.goal}`;
 	header += `\n\nCurrent tab — title: ${observation.title || '(untitled)'} — url: ${observation.url}`;
 	header += `\nScreenshot dimensions: ${observation.width} × ${observation.height} (CSS pixels). All coordinates you emit must be in this space.`;
+	header += `\n\n${renderScrollRegions(observation.scrollRegions)}`;
 	if (historyText) {
 		header += `\n\nRecent history (oldest → newest):\n${historyText}`;
 	}
 	if (lastResults && lastResults.length > 0) {
 		const lines = lastResults.map(
-			(r) => `- ${r.variant}: ${r.result}${r.error ? ` (${r.error})` : ''}`
+			(r) =>
+				`- ${r.variant}: ${r.result}${r.error ? ` (${r.error})` : ''}` +
+				(r.data !== undefined ? `\n  text read: ${r.data || '(nothing visible in box)'}` : '')
 		);
 		header += `\n\nResults of the previous batch:\n${lines.join('\n')}`;
 	} else if (stepNumber === 1) {
 		header += `\n\nThis is the first turn. No prior actions have been taken.`;
+	}
+	const notice = memory.noProgressNotice();
+	if (notice) {
+		header += `\n\n${notice}`;
 	}
 	header += `\n\nCurrent screenshot:`;
 

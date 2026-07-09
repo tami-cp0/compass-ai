@@ -14,6 +14,7 @@ export const WEB_AGENT_STEP_SCHEMA = {
 		properties: {
 			reasoning: { type: 'string' },
 			progress_note: { type: 'string' },
+			page_changed: { type: 'boolean' },
 			actions: {
 				type: 'array',
 				items: {
@@ -168,6 +169,18 @@ export const WEB_AGENT_STEP_SCHEMA = {
 							type: 'object',
 							additionalProperties: false,
 							properties: {
+								variant: { type: 'string', enum: ['page:read'] },
+								x: { type: 'integer' },
+								y: { type: 'integer' },
+								width: { type: 'integer' },
+								height: { type: 'integer' },
+							},
+							required: ['variant', 'x', 'y', 'width', 'height'],
+						},
+						{
+							type: 'object',
+							additionalProperties: false,
+							properties: {
 								variant: { type: 'string', enum: ['task:done'] },
 								evidence: { type: 'string' },
 							},
@@ -186,7 +199,7 @@ export const WEB_AGENT_STEP_SCHEMA = {
 				},
 			},
 		},
-		required: ['reasoning', 'progress_note', 'actions'],
+		required: ['reasoning', 'progress_note', 'page_changed', 'actions'],
 	},
 };
 
@@ -210,6 +223,7 @@ Available actions (emit one or more per step, executed serially):
 - browser:tab:switch { index } — switch to an already-open tab by index
 - browser:tab:new — open and switch to a new tab
 - wait { seconds } — actions already wait for stability; only use when a clearly larger wait is required
+- page:read { x, y, width, height } — return the EXACT visible text inside this box (CSS-pixel coords on the current screenshot). Use it to read precise figures the screenshot might render too small to trust; box tightly around only what you need. The text comes back on next turn's result.
 - task:done { evidence } — finish successfully; evidence MUST cite specific observable content from the current screenshot (a number, a row, a title)
 - task:fail { reason } — task is impossible or you have tried and exhausted alternatives
 `.trim();
