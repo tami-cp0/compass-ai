@@ -29,6 +29,8 @@ export type ExtensionMessage = {
     screenshot: string;
     width: number;
     height: number;
+    cssWidth: number;
+    cssHeight: number;
     url: string;
     title: string;
     scrollRegions?: ScrollRegion[];
@@ -39,6 +41,10 @@ export type ExtensionMessage = {
     actionId: string;
     success: boolean;
     error?: string;
+} | {
+    type: "vision_frame";
+    sessionId: string;
+    data: string;
 };
 export type ServerMessage = {
     type: "audio_chunk";
@@ -98,6 +104,12 @@ export type ServerMessage = {
     taskId: string;
     reason: "complete" | "cancelled" | "error";
     error?: string;
+} | {
+    type: "vision_start";
+    sessionId: string;
+} | {
+    type: "vision_stop";
+    sessionId: string;
 };
 export interface PaneLink {
     url: string;
@@ -187,16 +199,4 @@ export type AgentAction = {
     reason: string;
 };
 export type ActionVariant = AgentAction["variant"];
-export interface AgentActionResult {
-    variant: ActionVariant;
-    result: "ok" | "failed";
-    error?: string;
-    data?: string;
-}
-export interface AgentStep {
-    reasoning: string;
-    progress_note: string;
-    page_changed: boolean;
-    actions: AgentAction[];
-}
 //# sourceMappingURL=messages.d.ts.map

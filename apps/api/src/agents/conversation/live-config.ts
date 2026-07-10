@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality, ThinkingLevel, type FunctionDeclaration } from '@google/genai';
+import { GoogleGenAI, MediaResolution, Modality, ThinkingLevel, type FunctionDeclaration } from '@google/genai';
 
 if (!process.env.GEMINI_API_KEY) {
 	throw new Error('GEMINI_API_KEY environment variable is not set');
@@ -28,17 +28,28 @@ Behavior:
 <Tool_Rules>
 Tool descriptions are in the function schema; the rules below are the non-obvious additions.
 
-dispatch_research: The background search agent receives NO chat history. Write a fully explicit, self-contained 'description' — never use pronouns. Carry the intent, not just keywords: the actual question, what kind of evidence answers it when that's implied (sentiment → forums/social; an executive's words → the statement itself; official facts → filings), the time period if one matters, and whether to bring back links. It returns "sources" (url + title + platform) only for primary documents or when you asked. Up to 2 tasks run in parallel.
+dispatch_research: The background search agent receives NO chat history. Write a fully explicit, self-contained 'description' — never use pronouns. Carry the intent, not just keywords: the actual question, what kind of evidence answers it when that's implied (sentiment → forums/social; an executive's words → the statement itself; official facts → filings), the time period if one matters, and whether to bring back links. It returns "sources" (url + title + platform) only for primary documents or when you asked. Up to 2 tasks run in parallel. This is for DEPTH — full equity analysis. For a one-off fact, use quick_search.
+
+quick_search: A fast, inline web lookup for a single small fact — a date, whether today is a trading holiday, current hours, one figure. It returns the plain-text answer to you directly (no async wait), so you can fold it straight into what you're saying. Self-contained query; no chat history. Prefer it over dispatch_research whenever the question is small — reserve dispatch_research for genuine analysis.
 
 dispatch_automation: Never automate the final buy or sell submission. Stop before it and surface to the user.
 
 set_pin_pane: Use the pane any time visual rendering serves the user — comparisons, lists, snippets, references, anything that reads better than it sounds. Pin freely, with or without speaking. For the full composition/chart format, call get_tool_help(["set_pin_pane"]) before composing unless you already remember it — see <Pin_Pane> and <Tool_Help>.
 
-request_screenshot: This is your EYES — it is the only way you see what the user sees. You are NOT given the screen automatically; between screenshots you are blind and must not describe, quote, or reason about on-screen state from memory or assumption. Call it silently, as often as you need: before answering anything about what is on screen, before deciding whether a page/data is already visible (so you don't navigate somewhere you're already at), and again any time the view may have changed (after the user acts, scrolls, or navigates). A fresh screenshot is cheap relative to being wrong. Never announce it. Atlass loads content asynchronously, so a capture can catch a page mid-load — a blank area or a missing thing you expected usually means "not loaded yet", not "not there"; wait a beat and look once more before concluding absence.
+enable_vision / disable_vision: Vision is your EYES, and it is expensive while open — every moment it streams costs tokens. So treat it like opening your eyes for a specific purpose and closing them the instant that purpose is served. You get ONE screenshot at session start; after that you are blind until you enable vision, and while blind you must never describe, quote, or reason about on-screen state from memory or assumption.
+
+The whole discipline is: open → look → close.
+- OPEN the moment you need to see the live screen — to check what page is up before acting (so you don't navigate where you already are), to read what's displayed, to confirm a result, or to watch the user do something. Enable silently; never announce it.
+- Choose the mode by how long you need to look. A one-time look — "what's on my screen", "is my portfolio open", reading a value, confirming one thing — is 'glance': you look, you get your answer, you're done. Only use 'sustained' when you genuinely need to keep watching a live sequence (following the user as they fill a form, waiting for something to change). If you're not actively watching an ongoing process, it's a glance, not sustained.
+- CLOSE with disable_vision the instant you have what you needed — the answer's read, the page's confirmed, the moment's passed. Do not leave vision on "just in case"; if you need to look again later, open it again then. (It also auto-disables as a safety net, but that is a backstop for mistakes, not your plan — you close it yourself.)
+
+Timing matters: enabling does not show you a frame instantly — after you enable, frames start arriving over the next moments, so you enable, then actually look at the frames that come in, and only THEN act and close. Never enable and disable in the same breath (you'd see nothing). The natural rhythm across a short span: enable → frames arrive → you read/answer → disable.
+
+Atlass loads asynchronously, so the first frames after enabling can catch a page mid-load — a blank area or missing thing usually means "not loaded yet", not "not there"; keep looking a beat before concluding absence, then close.
 
 request_current_time: Call silently. Never announce.
 
-read_page_data: Call silently. Use it whenever you are about to quote exact figures — prices, quantities, balances, order rows — because native reading of dense digits off a screenshot is unreliable. It returns the page's REAL characters for exact digits. You draw a box (x, y, width, height) on your current screenshot around the value(s) you need; it returns only the visible text inside that box. So: take/have a fresh screenshot, locate what you need in it, box it tightly (one value, one row, one card — not the whole page), and read. A tight box is a small, precise return; a loose box wastes tokens and dilutes the answer.
+read_page_data: Call silently. Use it whenever you are about to quote exact figures — prices, quantities, balances, order rows — because native reading of dense digits off a video frame is unreliable. It returns the page's REAL characters for exact digits. You must have vision on and a recent frame; draw a box (x, y, width, height) on that frame around the value(s) you need, and it returns only the visible text inside that box. Box it tightly (one value, one row, one card — not the whole page): a tight box is a small, precise return; a loose box wastes tokens and dilutes the answer.
 
 lookup_ticker: Call silently before any ticker-based research, automation, or screen action. Each match includes the company's SECTOR — this is how you derive sector/industry views of holdings, since the platform shows none. Set by_sector:true to list every company in a sector (e.g. "insurance", "oil and gas"). If confidence is "exact", proceed with the canonical ticker. If "fuzzy", say the top candidate(s) back to the user — "did you mean Conhall (CONHAL), Conoil (CONOIL), or Vono (VONO)?" — and wait for confirmation. If "none", ask the user to spell the ticker. Never dispatch deep research as a way to verify a ticker — that wastes ~15,000 tokens per wrong guess.
 </Tool_Rules>
@@ -50,7 +61,14 @@ Its full composition guide — exact chart/table/stacked-bar JSON, sizing, colum
 </Pin_Pane>
 
 <Async_Returns>
-After dispatching a tool, results arrive later as injected messages. These are async returns from your own tool calls, not user speech. Each has a specific format:
+Some of your tools don't answer immediately — research and automation run in the background and return later as injected messages (async returns from your own calls, not user speech). This creates a gap between asking for something and having it, and how you hold that gap is central to being trusted.
+
+Know the difference between three things, and never blur them:
+- What you actually KNOW — you have seen it or been told it by the user. You can state it.
+- What you've merely SET IN MOTION — you dispatched research or an automation; the answer is not back yet. You do NOT know it. Acknowledge briefly ("let me pull that up") and then hold: don't manufacture new questions, extra points, or guesses to fill the wait — that is answering something you haven't been answered, and it overwhelms. Silence or a short "one sec" beats noise. When the result actually lands, then you speak with substance.
+- What you've only heard SECONDHAND — a background agent reporting what it saw. That is not the same as you seeing it. An automation finishing means the task ran, not that you know the current screen. If what you're about to tell the user depends on what's on screen right now, you have eyes — enable vision and confirm it yourself rather than repeating a stale report. Your word to the user is yours; it must be true of the screen now, not true of what some agent claimed a moment ago.
+
+The through-line: only assert what you genuinely have. Waiting is not a failure to fill; secondhand is not firsthand.
 
 Every async return except the screenshot frame includes a "Completed at:" or "Failed at:" line in human-readable West Africa Time. Use those as the current "now" anchor — they're fresher than the session clock.
 
@@ -59,16 +77,17 @@ Every async return except the screenshot frame includes a "Completed at:" or "Fa
   "coverage_notes", when present, is the researcher's reliability flag (thin, one-sided, or promotional coverage). Fold the caveat into how you present the finding — "worth noting this mostly comes from the company's own statements" — don't hide it and don't read it verbatim.
 - [research error] Task "<name>" failed: <reason> — the research task failed. Acknowledge briefly and move on.
 - [automation in progress] Task "<name>" — step N/20. — mid-run heartbeat for context only. Do not narrate progress unless the user asks. Use this to stay aware of what the automation is doing so your next response is coherent.
-- [automation context] Task "<name>" completed in N steps. — automation finished. The message includes a Completed at line, a Goal line (the original instruction you sent), a step-by-step progress log, and an Evidence line. A screenshot of the end state arrives in your visual context just before this message — it was taken moments after the run ended, so it may have caught the page still loading; if it looks blank or incomplete, take a fresh one before reporting. automation_slot_freed: true means you can dispatch again. Re-read the Goal so you remember what was being attempted before reacting.
+- [automation context] Task "<name>" finished its run in N steps. — the automation reached its end. The message has a Completed at line, the Goal (the instruction you sent), and a step-by-step progress log. It tells you the task RAN — it does not tell you what's on the screen now, and no frame is handed to you. Re-read the Goal so you know what was attempted. If the user needs to know the resulting state, enable your own vision and look before you report — don't infer the screen from the fact that the run finished.
 - [automation context] Task "<name>" requires your action to proceed. Please review what's on screen and confirm. — automation has reached a buy or sell submission. Tell the user to look at their screen and confirm.
 - [automation context] Task "<name>" failed/aborted: <reason> — automation failed. The message includes a Failed at line, the Goal line, and the step-by-step log of what was actually tried. Before you say anything, READ that log and work out the TRUE cause — it is usually specific and it is yours: the clicks didn't reach the control, the target wasn't where expected, a step couldn't complete. Do not default to "the page won't load" or "it's not available" unless the log actually shows that (e.g. blank pages, a load error, the market-unavailable modal) — the log here shows the page was fine and the navigation didn't land, which is a different thing you must report honestly. Speak in first person about your own attempt ("I couldn't get the holdings to open" — not "the portfolio isn't loading"), then decide: retry with a clearer description, try a different route yourself, or tell the user what blocked you. automation_slot_freed: true means you can dispatch again immediately.
-- Screenshot result: after request_screenshot returns status "captured", the image arrives as a realtime media frame in your visual context — no marker text precedes it. Examine the latest frame before responding or acting.
+- [still running: ...] — a bare status note that appears when you start a turn while background work is unfinished. It names what has NOT come back yet. It is a fact, not an instruction — reason from it: if the user is asking about something still on this list, you don't have it yet.
+- Vision frames: while vision is on, the screen streams into your visual context as frames — no marker text precedes them. Always reason about the LATEST frame. Once you've seen what you enabled vision for, disable it — don't let it keep streaming. If your vision turns off automatically you'll get a short "[context] Your vision just turned off" note; that means the safety net caught it still on — re-enable only if you still need to see.
 
 Special signal — market data session unavailable:
 If any automation message (progress log or evidence) mentions "Trading/Market Data Session not available" or "market data session unavailable", the NGX live feed is down. This happens during pre-market, after market close, on Nigerian public holidays, or during an Atlass outage. Order books and trade panes will be empty until the feed returns. When you see this:
 1. Tell the user briefly and naturally — "the market feed is down right now, so the order book is empty." Do not read the modal text verbatim.
-2. Call request_current_time to get the precise date, then silently dispatch a small research task with that literal date — e.g. general_research with description "Check whether 12 June 2026 is a Nigerian public holiday or outside NGX trading hours (10:00-14:30 WAT, Mon-Fri)." Never use placeholders like "<current date>" — substitute the real value.
-3. When that research returns, weave the answer in — e.g. "looks like today is Eid al-Fitr, so the exchange is closed" or "we're outside trading hours — NGX wraps at 2:30 PM." If the research is inconclusive, just say the feed is unavailable and offer to try again later.
+2. Call request_current_time to get the precise date, then silently call quick_search with that literal date — e.g. "Is 12 June 2026 a Nigerian public holiday or outside NGX trading hours (10:00-14:30 WAT, Mon-Fri)?" Never use placeholders like "<current date>" — substitute the real value.
+3. Weave the answer in — e.g. "looks like today is Eid al-Fitr, so the exchange is closed" or "we're outside trading hours — NGX wraps at 2:30 PM." If the lookup is inconclusive, just say the feed is unavailable and offer to try again later.
 Do not re-dispatch the original automation while the feed is down — it will just hit the same modal.
 </Async_Returns>
 
@@ -136,7 +155,7 @@ Don't: restate the title or open with "Welcome"/"Overview"/"Summary"; end short 
 
 	portfolio_brief: `Handling portfolio requests.
 
-- Ground first: screenshot; if the holdings are already on screen, don't navigate. read_page_data for exact figures. Report only what you can see or derive — never fabricate.
+- Ground first: enable vision and look; if the holdings are already on screen, don't navigate. read_page_data for exact figures. Report only what you can see or derive — never fabricate.
 - Match the answer to the ask. "Show me my portfolio" → the holdings, pinned well (table, or chart + table), one spoken headline. "How am I doing" → the performance story: value, today's change, the mover and the drag. Sector/industry questions → map each holding's ticker to its sector with lookup_ticker (the platform shows no sector view) and compose it yourself. Deeper "what do you think" → connect holdings, concentration, and what you know or can research — and give a view.
 - Volunteer what serves the ask, not a script: a cleared dividend or pending action is worth a mention; cash and buying power belong when the conversation is about trading or liquidity, not appended to every answer.
 - It's a peer conversation: notice, react, follow the user's lead.`,
@@ -146,7 +165,7 @@ export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
 	{
 		name: 'dispatch_research',
 		description:
-			'Start a background research task. Returns immediately; result arrives as an async injection. Up to 2 in parallel.',
+			'Start a deep background research task — in-depth financial/equity analysis with metrics, sources, and context. Returns immediately; result arrives as an async injection. Up to 2 in parallel. For a quick factual lookup, use quick_search instead.',
 		parametersJsonSchema: {
 			type: 'object',
 			properties: {
@@ -160,20 +179,30 @@ export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
 					description:
 						'Explicit, self-contained research query. No pronouns — the search agent has no chat history.',
 				},
-				profile: {
+			},
+			required: ['name', 'description'],
+		},
+	},
+	{
+		name: 'quick_search',
+		description:
+			'Fast web lookup for a single fact or short question — a date, a trading holiday, current hours, one figure. Runs inline and returns the answer directly (not an async injection), so you can use it mid-sentence. Reach for this over dispatch_research whenever the question is small; dispatch_research is for deep equity analysis.',
+		parametersJsonSchema: {
+			type: 'object',
+			properties: {
+				query: {
 					type: 'string',
-					enum: ['stock_analysis', 'general_research'],
 					description:
-						'stock_analysis: in-depth financial data. general_research: fast or broad queries.',
+						'The question to look up, phrased however you like — it goes straight to a fast search model. Be self-contained; there is no chat history. Example: "Is 9 July 2026 a Nigerian public holiday or an NGX trading day?"',
 				},
 			},
-			required: ['name', 'description', 'profile'],
+			required: ['query'],
 		},
 	},
 	{
 		name: 'dispatch_automation',
 		description:
-			'Start a background browser automation. Returns immediately. One at a time; progress and outcomes arrive as async injections. HARD PRECONDITION: you MUST call request_screenshot immediately before every dispatch — no exceptions. The platform is a single-page app whose state shows only on screen, never in the URL, so a goal written without a fresh screenshot is guessed. Look at that screenshot first: if it already shows the goal satisfied (the target page is open, the data is visible), do NOT dispatch — answer from what you see. Dispatch only when the fresh screen shows the goal is not yet met. You may also call read_page_data to read exact values off that screenshot before deciding.',
+			'Start a background browser automation. Returns immediately. One at a time; progress and outcomes arrive as async injections. HARD PRECONDITION: you MUST have vision on and actually look at the current screen immediately before every dispatch — no exceptions. The platform is a single-page app whose state shows only on screen, never in the URL, so a goal written without seeing the live screen is guessed. Look first: if the screen already shows the goal satisfied (the target page is open, the data is visible), do NOT dispatch — answer from what you see. Dispatch only when the current screen shows the goal is not yet met. You may also call read_page_data to read exact values off the frame before deciding.',
 		parametersJsonSchema: {
 			type: 'object',
 			properties: {
@@ -194,16 +223,23 @@ export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
 	{
 		name: 'cancel_task',
 		description:
-			'Cancel a running task by name (research or automation).',
+			'Stop running background work — research or automation — mid-flight. Give a name to cancel one specific task, or omit the name to cancel by scope (everything, all research, or the automation). Use this the moment the user changes their mind, asks you to stop, or the work is no longer needed.',
 		parametersJsonSchema: {
 			type: 'object',
 			properties: {
 				name: {
 					type: 'string',
-					description: 'Exact name the task was dispatched with.',
+					description:
+						'Optional. Exact name a task was dispatched with, to cancel just that one. Omit to cancel by scope instead.',
+				},
+				scope: {
+					type: 'string',
+					enum: ['all', 'research', 'automation'],
+					description:
+						'Used only when name is omitted. "all" (default) stops everything running; "research" stops all research tasks; "automation" stops the running automation.',
 				},
 			},
-			required: ['name'],
+			required: [],
 		},
 	},
 	{
@@ -292,8 +328,26 @@ export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
 		},
 	},
 	{
-		name: 'request_screenshot',
-		description: 'Capture the current browser screen. Image arrives as a realtime media frame.',
+		name: 'enable_vision',
+		description:
+			"Turn on your live vision — a continuous view of the user's screen streamed to you frame by frame. Use it whenever you need to SEE what's on screen: to read the current page, watch the user do something, confirm a result, or ground an answer in what's actually displayed. You start blind except for one screenshot at the start of the session, so enable vision before reasoning about anything currently on screen. It costs resources while on, so pick the mode that matches your need; it also turns itself off after a short while to be safe — just enable again if you still need to look.",
+		parametersJsonSchema: {
+			type: 'object',
+			properties: {
+				mode: {
+					type: 'string',
+					enum: ['glance', 'sustained'],
+					description:
+						"'glance' for a quick look (reading the current screen, confirming one thing) — it auto-turns-off after a few seconds. 'sustained' when you need to keep watching (following the user as they act) — stays on longer. Both eventually auto-disable as a safety cap.",
+				},
+			},
+			required: ['mode'],
+		},
+	},
+	{
+		name: 'disable_vision',
+		description:
+			"Turn your live vision off when you no longer need to see the screen. Do this as soon as you're done looking — it stops the stream and conserves resources. (Vision also auto-disables on its own, so this is for when you finish early.)",
 		parametersJsonSchema: {
 			type: 'object',
 			properties: {},
@@ -350,6 +404,11 @@ export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
 export const LIVE_CONFIG = {
 	tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
 	responseModalities: [Modality.AUDIO],
+	// Vision-frame cost lever. For VIDEO frames, MEDIUM and LOW are identical
+	// (70 tokens/frame) — Google collapses them — vs HIGH at 258. Frames re-bill
+	// each turn while in context, so this is the biggest live-cost dial;
+	// read_page_data recovers exact digits, so the frame only needs to locate.
+	mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
 	speechConfig: {
 		voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Gacrux' } },
 	},
@@ -366,9 +425,11 @@ export const LIVE_CONFIG = {
 	// Sliding-window compression caps the per-turn re-billed history (every turn
 	// re-bills the whole retained window, so this is a direct cost lever):
 	// compression fires at triggerTokens and shrinks back to targetTokens. Both
-	// are strings per the SDK; targetTokens must be < triggerTokens.
+	// are strings per the SDK; targetTokens must be < triggerTokens. Kept tight
+	// because vision frames land in-context and re-bill each turn until evicted —
+	// a shorter window means fewer re-bills of stale frames.
 	contextWindowCompression: {
-		triggerTokens: '50000',
-		slidingWindow: { targetTokens: '25000' },
+		triggerTokens: '30000',
+		slidingWindow: { targetTokens: '15000' },
 	},
 };

@@ -35,6 +35,9 @@ export class GeminiLiveSession {
 	private processingToolCall = false;
 	private lastUserSpeechAt = 0;
 	private lastAudioChunkAt = 0;
+	// Guards the pending-task reminder to once per user turn (input transcription
+	// fires incrementally). Reset when the model's turn completes.
+	private pendingNoticedThisTurn = false;
 	private userSpeechRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private gateRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private injectQueue: Array<
@@ -51,19 +54,37 @@ export class GeminiLiveSession {
 	// turn-end event was lost (reconnect swap, dropped frame) — force it open.
 	private static readonly SPEAKING_GATE_STALE_MS = 10_000;
 
+	// Vision (continuous sight) lifetime. A "glance" auto-disables after a short
+	// look; a hard cap disables any vision so it can never drain unattended. When
+	// the agent needs to see again it re-enables.
+	private static readonly VISION_GLANCE_MS = 15_000;
+	private static readonly VISION_HARD_CAP_MS = 60_000;
+	private visionOn = false;
+	private visionGlanceTimer: ReturnType<typeof setTimeout> | null = null;
+	private visionCapTimer: ReturnType<typeof setTimeout> | null = null;
+
 	// Tool call handlers — wired by TaskManager.
 	onDispatchResearch:
-		| ((
-				name: string,
-				description: string,
-				profile: 'stock_analysis' | 'general_research'
-		  ) => Record<string, unknown>)
+		| ((name: string, description: string) => Record<string, unknown>)
+		| null = null;
+	onQuickSearch:
+		| ((query: string) => Promise<Record<string, unknown>>)
 		| null = null;
 	onDispatchAutomation:
 		| ((name: string, description: string) => Record<string, unknown>)
 		| null = null;
-	onCancelTask: ((name: string) => Record<string, unknown>) | null = null;
+	onCancelTask:
+		| ((name?: string, scope?: 'all' | 'research' | 'automation') => Record<string, unknown>)
+		| null = null;
+	// One-shot capture, used only to ground the model with an initial frame at
+	// session start. Continuous sight is the vision stream (onVisionChange).
 	onRequestScreenshot: (() => Promise<string>) | null = null;
+	// Toggle the continuous vision stream on/off in the extension. The agent no
+	// longer pulls single screenshots; when it needs to see, it enables vision.
+	onVisionChange: ((on: boolean) => void) | null = null;
+	// Names of still-running background tasks, queried when the user starts a
+	// turn so the model can be reminded — as bare fact — what's still pending.
+	getPendingTaskNames: (() => string[]) | null = null;
 	onReadPageData:
 		| ((box: { x: number; y: number; width: number; height: number }) => Promise<{ data: string; truncated: boolean; error?: string } | null>)
 		| null = null;
@@ -186,6 +207,56 @@ export class GeminiLiveSession {
 		this.session.sendRealtimeInput({
 			video: { data, mimeType: 'image/png' },
 		});
+	}
+
+	// Enable continuous vision. mode 'glance' auto-disables after a short look;
+	// 'sustained' stays on. Either way a hard cap disables it eventually so it
+	// can never drain unattended. Returns the state the agent should hear back.
+	enableVision(mode: 'glance' | 'sustained'): Record<string, unknown> {
+		this._clearVisionTimers();
+		if (!this.visionOn) {
+			this.visionOn = true;
+			this.onVisionChange?.(true);
+			this.tokens?.recordVisionEnabled(mode);
+			this.log.info('[vision] enabled', { mode });
+		}
+		if (mode === 'glance') {
+			this.visionGlanceTimer = setTimeout(() => {
+				this._stopVision('glance elapsed');
+			}, GeminiLiveSession.VISION_GLANCE_MS);
+		}
+		this.visionCapTimer = setTimeout(() => {
+			this._stopVision('safety cap');
+		}, GeminiLiveSession.VISION_HARD_CAP_MS);
+		return { status: 'vision_on', mode };
+	}
+
+	// Disable vision on the agent's request. Idempotent.
+	disableVision(): Record<string, unknown> {
+		this._stopVision('agent disabled');
+		return { status: 'vision_off' };
+	}
+
+	private _stopVision(reason: string): void {
+		this._clearVisionTimers();
+		if (!this.visionOn) return;
+		this.visionOn = false;
+		this.onVisionChange?.(false);
+		this.log.info('[vision] disabled', { reason });
+		// A timer-driven stop (glance/cap) is silent to the user but the agent
+		// should know its sight went dark, so it re-enables if it still needs it.
+		if (reason !== 'agent disabled') {
+			this.injectContent(
+				'[context] Your vision just turned off automatically to conserve resources. If you still need to see the screen, enable it again.'
+			);
+		}
+	}
+
+	private _clearVisionTimers(): void {
+		if (this.visionGlanceTimer) clearTimeout(this.visionGlanceTimer);
+		if (this.visionCapTimer) clearTimeout(this.visionCapTimer);
+		this.visionGlanceTimer = null;
+		this.visionCapTimer = null;
 	}
 
 	// Queue a background inject. Flushes when the model is idle, else waits for
@@ -313,6 +384,7 @@ export class GeminiLiveSession {
 			clearTimeout(this.gateRetryTimer);
 			this.gateRetryTimer = null;
 		}
+		this._clearVisionTimers();
 		this.session?.close();
 		this.session = null;
 	}
@@ -411,6 +483,16 @@ export class GeminiLiveSession {
 		if (inputTranscript?.text) {
 			this.lastUserSpeechAt = Date.now();
 			this.flushHeartbeatsForUserTurn();
+			// Once per user turn, if anything is still running, surface it as bare
+			// fact (no instruction) so the model reasons about what it's still
+			// waiting on rather than losing track and moving on.
+			if (!this.pendingNoticedThisTurn) {
+				this.pendingNoticedThisTurn = true;
+				const pending = this.getPendingTaskNames?.() ?? [];
+				if (pending.length > 0) {
+					this.injectContent(`[still running: ${pending.join('; ')}]`);
+				}
+			}
 			appendTurn(this.sessionId, {
 				role: 'user',
 				content: inputTranscript.text,
@@ -446,6 +528,7 @@ export class GeminiLiveSession {
 		// speaking.
 		if (msg.serverContent?.turnComplete || msg.serverContent?.interrupted) {
 			this.isModelSpeaking = false;
+			this.pendingNoticedThisTurn = false; // arm the pending reminder for the next user turn
 			this.flushInjectQueue();
 		}
 
@@ -464,40 +547,15 @@ export class GeminiLiveSession {
 			response: Record<string, unknown>;
 		}> = [];
 
-		// Captured screenshot payload — sent as a realtimeInput frame AFTER the
-		// batched toolResponse (protocol requires functionResponses before any
-		// clientContent/realtimeInput follow-up).
-		let screenshotImageBase64: string | null = null;
-
 		for (const call of toolCall.functionCalls) {
 			let result: Record<string, unknown>;
 
 			// Handle no-args tools first, before the args guard
-			if (
-				call.name === 'request_screenshot' &&
-				this.onRequestScreenshot
-			) {
-				const dataUrl = await this.onRequestScreenshot();
-				const screenshotResult: Record<string, unknown> = dataUrl
-					? { status: 'captured' }
-					: { status: 'failed', reason: 'capture_error' };
-				responses.push({
-					id: call.id ?? '',
-					name: call.name ?? '',
-					response: screenshotResult,
-				});
-				if (dataUrl) {
-					const commaIdx = dataUrl.indexOf(',');
-					screenshotImageBase64 =
-						commaIdx !== -1 ? dataUrl.slice(commaIdx + 1) : dataUrl;
-				}
-				this.toolCallCount++;
-				this.log.info('[request_screenshot] captured', {
-					status: screenshotResult.status,
-				});
-				// Continue processing any remaining tools in this batch — the
-				// screenshot image frame is sent after the full toolResponse below.
-				continue;
+			if (call.name === 'enable_vision') {
+				const mode = (call.args as Record<string, unknown> | undefined)?.mode;
+				result = this.enableVision(mode === 'sustained' ? 'sustained' : 'glance');
+			} else if (call.name === 'disable_vision') {
+				result = this.disableVision();
 			} else if (call.name === 'read_page_data' && this.onReadPageData) {
 				const a = (call.args ?? {}) as Record<string, unknown>;
 				const box = {
@@ -566,9 +624,10 @@ export class GeminiLiveSession {
 				) {
 					result = this.onDispatchResearch(
 						args.name as string,
-						args.description as string,
-						args.profile as 'stock_analysis' | 'general_research'
+						args.description as string
 					);
+				} else if (call.name === 'quick_search' && this.onQuickSearch) {
+					result = await this.onQuickSearch(args.query as string);
 				} else if (
 					call.name === 'dispatch_automation' &&
 					this.onDispatchAutomation
@@ -578,7 +637,10 @@ export class GeminiLiveSession {
 						args.description as string
 					);
 				} else if (call.name === 'cancel_task' && this.onCancelTask) {
-					result = this.onCancelTask(args.name as string);
+					result = this.onCancelTask(
+						args.name as string | undefined,
+						args.scope as 'all' | 'research' | 'automation' | undefined
+					);
 				} else if (call.name === 'lookup_ticker') {
 					result = args.by_sector === true
 						? { ...lookupSector(args.query as string) }
@@ -616,16 +678,8 @@ export class GeminiLiveSession {
 
 		this.session?.sendToolResponse({ functionResponses: responses });
 
-		// Send the screenshot image as a follow-up media frame — AFTER the batched
-		// toolResponse (protocol requires functionResponses before realtimeInput).
-		if (screenshotImageBase64 !== null) {
-			this.session?.sendRealtimeInput({
-				video: { data: screenshotImageBase64, mimeType: 'image/jpeg' },
-			});
-		}
-
 		// Release the tool-call gate and drain any injects that piled up while
-		// the handler was awaiting the screenshot capture.
+		// the handler was processing this batch.
 		this.processingToolCall = false;
 		this.flushInjectQueue();
 	}

@@ -23,6 +23,8 @@ export interface UseSession {
   wantSession:         boolean
   isAutomationRunning: boolean
   researchTasks:       ResearchTask[]
+  // The live agent has its vision (continuous screen view) turned on.
+  isVisionOn:          boolean
   connectionStatus:    ConnectionStatus
   isOffline:           boolean
   toggle:              () => void
@@ -35,6 +37,7 @@ export function useSession(): UseSession {
   const [active,              setActive]              = useState(false)
   const [isAutomationRunning, setIsAutomationRunning] = useState(false)
   const [researchTasks,       setResearchTasks]       = useState<ResearchTask[]>([])
+  const [isVisionOn,          setIsVisionOn]          = useState(false)
   const [connectionStatus,    setConnectionStatus]    = useState<ConnectionStatus>("ok")
   const [isOffline,           setIsOffline]           = useState(typeof navigator !== "undefined" && !navigator.onLine)
   const [wantSession,         setWantSession]         = useState(false)
@@ -84,6 +87,14 @@ export function useSession(): UseSession {
         }
         return false
       }
+      if (msg.type === "vision_start") {
+        setIsVisionOn(true)
+        return false
+      }
+      if (msg.type === "vision_stop") {
+        setIsVisionOn(false)
+        return false
+      }
       if (msg.type === "connection_status") {
         setConnectionStatus(msg.status)
         // Server can't deliver automation_end or research_status through a
@@ -92,6 +103,7 @@ export function useSession(): UseSession {
         if (msg.status === "disconnected") {
           setIsAutomationRunning(false)
           setResearchTasks([])
+          setIsVisionOn(false)
         }
         return false
       }
@@ -129,6 +141,7 @@ export function useSession(): UseSession {
   const stopSession = useCallback(() => {
     setWantSession(false)
     setResearchTasks([])
+    setIsVisionOn(false)
     chrome.runtime.sendMessage({ type: "session_end" })
     teardownCapture()
   }, [teardownCapture])
@@ -158,5 +171,5 @@ export function useSession(): UseSession {
     }
   }, [isOffline, wantSession, teardownCapture, startSession])
 
-  return { active, wantSession, isAutomationRunning, researchTasks, connectionStatus, isOffline, toggle }
+  return { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, toggle }
 }

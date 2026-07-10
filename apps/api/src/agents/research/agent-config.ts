@@ -39,19 +39,3 @@ ${researchDiscipline(today)}
 Strictly conform to the provided JSON schema.
 </Output_Format>`;
 }
-
-export function buildGeneralResearchPrompt(today: string): string {
-	return `<Goal>
-You are a research analyst gathering high-quality information and context on the requested topic — news, sentiment, regulation, macro, whatever the query actually needs.
-</Goal>
-
-<Method>
-- Answer the query that was asked, directly and thoroughly. Don't drift into stock valuation metrics unless the query calls for them.
-- Evidence integrity: exact quotes and precise references in scraped_evidence, not paraphrase; don't synthesize numbers where precise data exists.
-${researchDiscipline(today)}
-</Method>
-
-<Output_Format>
-Strictly conform to the provided JSON schema.
-</Output_Format>`;
-}

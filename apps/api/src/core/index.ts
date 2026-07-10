@@ -52,7 +52,8 @@ async function main() {
 		nodeEnv: process.env.NODE_ENV,
 		geminiModel: process.env.GEMINI_LIVE_MODEL,
 		researchModel: process.env.OPENAI_RESEARCH_MODEL,
-		webModel: process.env.OPENAI_WEB_MODEL,
+		quickSearchModel: process.env.OPENAI_ALT_RESEARCH_MODEL,
+		webModel: process.env.CLAUDE_WEB_MODEL,
 	});
 	await connectRedis();
 	const listenSocket = startServer();

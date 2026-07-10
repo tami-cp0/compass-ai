@@ -1,6 +1,6 @@
 import { logger } from '../../infra/logger.js';
 import type { TokenUsage } from '../../infra/token-tracker.js';
-import { buildStockAnalysisPrompt, buildGeneralResearchPrompt, openai } from './agent-config.js';
+import { buildStockAnalysisPrompt, openai } from './agent-config.js';
 
 export interface TemporalValidation {
 	data_as_of_date: string;
@@ -53,14 +53,7 @@ export interface StockAnalysisOutput {
 	coverage_notes: string | null;
 }
 
-export interface GeneralResearchOutput {
-	identified_themes: string[];
-	scraped_evidence: string[];
-	sources: ResearchSource[];
-	coverage_notes: string | null;
-}
-
-export type ResearchOutput = StockAnalysisOutput | GeneralResearchOutput;
+export type ResearchOutput = StockAnalysisOutput;
 
 const sourcesSchema = {
 	type: 'array',
@@ -155,44 +148,20 @@ const stockAnalysisSchema = {
 	additionalProperties: false,
 };
 
-const generalResearchSchema = {
-	type: 'object',
-	properties: {
-		identified_themes: { type: 'array', items: { type: 'string' } },
-		scraped_evidence: { type: 'array', items: { type: 'string' } },
-		sources: sourcesSchema,
-		coverage_notes: { type: ['string', 'null'] },
-	},
-	required: ['identified_themes', 'scraped_evidence', 'sources', 'coverage_notes'],
-	additionalProperties: false,
-};
-
 export async function runResearchAgent(
-	profile: 'stock_analysis' | 'general_research',
 	description: string,
 	signal?: AbortSignal
 ): Promise<{ result: ResearchOutput; usage: TokenUsage }> {
 	const today = new Date().toISOString().slice(0, 10);
 	const userMessage = `Research query: ${description}`;
-
-	const model = profile === 'stock_analysis'
-		? process.env.OPENAI_RESEARCH_MODEL!
-		: process.env.OPENAI_ALT_RESEARCH_MODEL!;
-
-	const systemPrompt = profile === 'stock_analysis'
-		? buildStockAnalysisPrompt(today)
-		: buildGeneralResearchPrompt(today);
-
-	const schema = profile === 'stock_analysis'
-		? stockAnalysisSchema
-		: generalResearchSchema;
+	const model = process.env.OPENAI_RESEARCH_MODEL!;
 
 	const response = await openai.responses.create(
 		{
 			model,
 			tools: [{ type: 'web_search' }],
 			input: [
-				{ role: 'system', content: systemPrompt },
+				{ role: 'system', content: buildStockAnalysisPrompt(today) },
 				{ role: 'user', content: userMessage },
 			],
 			max_output_tokens: 4000,
@@ -201,7 +170,7 @@ export async function runResearchAgent(
 					type: 'json_schema',
 					name: 'research_output',
 					strict: true,
-					schema,
+					schema: stockAnalysisSchema,
 				},
 			},
 		},
@@ -235,14 +204,9 @@ export async function runResearchAgent(
 		);
 	}
 	
-	const themesCount = 'identified_themes' in parsed 
-		? parsed.identified_themes.length 
-		: parsed.dynamic_context.identified_themes.length;
-
 	logger.debug('ResearchAgent completed', {
-		profile,
 		model,
-		themes: themesCount,
+		themes: parsed.dynamic_context.identified_themes.length,
 	});
 
 	const u = response.usage;
@@ -253,4 +217,35 @@ export async function runResearchAgent(
 		cachedTokens: u?.input_tokens_details?.cached_tokens,
 	};
 	return { result: parsed, usage };
+}
+
+// Fast, unstructured lookup. No system prompt, no schema — the query goes
+// straight to the small model with web_search, and it answers in plain prose.
+// For quick factual checks (holidays, trading hours, a single figure) where the
+// heavy stock-analysis pipeline would be overkill.
+export async function runQuickSearch(
+	query: string,
+	signal?: AbortSignal
+): Promise<{ answer: string; usage: TokenUsage }> {
+	const response = await openai.responses.create(
+		{
+			model: process.env.OPENAI_ALT_RESEARCH_MODEL!,
+			tools: [{ type: 'web_search' }],
+			input: [{ role: 'user', content: query }],
+			max_output_tokens: 1500,
+		},
+		{ signal }
+	);
+
+	const answer = (response.output_text ?? '').trim();
+	if (!answer) throw new Error('QuickSearch returned empty output');
+
+	const u = response.usage;
+	const usage: TokenUsage = {
+		inputTokens: u?.input_tokens ?? 0,
+		outputTokens: u?.output_tokens ?? 0,
+		totalTokens: u?.total_tokens ?? 0,
+		cachedTokens: u?.input_tokens_details?.cached_tokens,
+	};
+	return { answer, usage };
 }

@@ -6,8 +6,12 @@ export type ExtensionMessage =
   | { type: "audio_chunk"; sessionId: string; data: string; mimeType: "audio/pcm" }
   | { type: "screenshot_response"; sessionId: string; requestId: string; dataUrl: string }
   | { type: "page_data_response"; sessionId: string; requestId: string; data: string; truncated: boolean; error?: string }
-  | { type: "agent_observation"; sessionId: string; taskId: string; screenshot: string; width: number; height: number; url: string; title: string; scrollRegions?: ScrollRegion[] }
+  | { type: "agent_observation"; sessionId: string; taskId: string; screenshot: string; width: number; height: number; cssWidth: number; cssHeight: number; url: string; title: string; scrollRegions?: ScrollRegion[] }
   | { type: "agent_action_result"; sessionId: string; taskId: string; actionId: string; success: boolean; error?: string }
+  // A single frame of the live vision stream (base64 PNG, no data: prefix),
+  // pushed by the extension while vision is on. Forwarded to the model as a
+  // realtime video frame.
+  | { type: "vision_frame"; sessionId: string; data: string }
 
 // Node → Gateway → Extension
 export type ServerMessage =
@@ -23,6 +27,10 @@ export type ServerMessage =
   | { type: "agent_observation_request"; sessionId: string; taskId: string }
   | { type: "agent_action"; sessionId: string; taskId: string; actionId: string; action: AgentAction }
   | { type: "automation_end"; sessionId: string; taskId: string; reason: "complete" | "cancelled" | "error"; error?: string }
+  // Start/stop the continuous vision stream. The extension runs the frame loop
+  // (adaptive cadence) between these; the pill shows a vision indicator while on.
+  | { type: "vision_start"; sessionId: string }
+  | { type: "vision_stop"; sessionId: string }
 
 // A clickable source link rendered as a glass "louver" bar at the bottom of
 // the pin pane. title is the page's real title; platform is the site name
@@ -90,28 +98,3 @@ export type AgentAction =
   | { variant: "task:fail"; reason: string }
 
 export type ActionVariant = AgentAction["variant"]
-
-// Result the API attaches to the next observation so the model knows what
-// just happened on each action it emitted.
-export interface AgentActionResult {
-  variant: ActionVariant
-  result: "ok" | "failed"
-  error?: string
-  // For page:read — the exact visible text extracted from the box, surfaced to
-  // the agent on its next observation.
-  data?: string
-}
-
-// One reasoning + action plan from the step planner.
-export interface AgentStep {
-  reasoning: string
-  // One-line post-action observation describing what visibly changed on the
-  // page (or "no change"). Surfaced to the orchestrating model as the
-  // automation's externalized progress log; reasoning stays internal.
-  progress_note: string
-  // Did the previous batch visibly change the page? The model observes this
-  // reliably; the server counts consecutive `false` click-batches to break
-  // no-progress loops (notice at 3, force-fail at 6). True on the first turn.
-  page_changed: boolean
-  actions: AgentAction[]
-}

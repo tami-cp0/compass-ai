@@ -1,7 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type {
 	AgentAction,
-	AgentActionResult,
 	Box,
 	ExtensionMessage,
 	SessionState,
@@ -9,8 +8,9 @@ import type {
 } from '@compass-ai/types';
 import type { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
 import { HELP_TOPICS } from '../agents/conversation/live-config.js';
-import { runResearchAgent } from '../agents/research/research-agent.js';
+import { runResearchAgent, runQuickSearch } from '../agents/research/research-agent.js';
 import { runWebAgentStep, type WebObservation } from '../agents/web/web-step.js';
+import { scaleAction } from '../agents/web/web-tools.js';
 import { WebAgentMemory } from '../agents/web/web-memory.js';
 import { sessionLogger, type Logger } from '../infra/logger.js';
 import { TokenTracker } from '../infra/token-tracker.js';
@@ -25,10 +25,6 @@ export interface SessionMetrics {
 	automationFailed: number;
 	automationSteps: number;
 }
-
-// Variants that terminate the loop. Anything after one of these in the same
-// batch is silently dropped.
-const TERMINAL_VARIANTS = new Set(['task:done', 'task:fail']);
 
 // Per-variant action timeouts (ms). Heavy SPAs can take 20s+ to settle after
 // navigation, so we give those a longer leash than mouse/keyboard inputs.
@@ -79,6 +75,35 @@ export class TaskManager {
 		gemini.onRequestScreenshot = () => this._requestScreenshot();
 		// Live agent frames are physical-resolution → physicalPixels: true.
 		gemini.onReadPageData = (box) => this._requestPageData(box, true);
+		gemini.onVisionChange = (on) => {
+			this.session.send({
+				type: on ? 'vision_start' : 'vision_stop',
+				sessionId: this.session.sessionId,
+			});
+		};
+		gemini.getPendingTaskNames = () => this.pendingTaskNames();
+	}
+
+	// Names of tasks still running, so the model can be told — as bare fact, not
+	// instruction — what it's still waiting on when it takes a turn. Empty when
+	// nothing is in flight.
+	pendingTaskNames(): string[] {
+		const names = this.session.researchSlots
+			.filter((s): s is Task => s !== null)
+			.map((s) => `research "${s.name}"`);
+		if (this.session.automationSlot) {
+			names.push(`automation "${this.session.automationSlot.name}"`);
+		}
+		return names;
+	}
+
+	// A vision frame arrived from the extension — push it into the model's
+	// visual context as a realtime video frame.
+	handleVisionFrame(msg: Extract<ExtensionMessage, { type: 'vision_frame' }>): void {
+		if (msg.data) {
+			this.gemini.sendVideoFrame(msg.data);
+			this.tokens.recordVisionFrame();
+		}
 	}
 
 	private _sendResearchStatus(
@@ -95,11 +120,7 @@ export class TaskManager {
 		});
 	}
 
-	dispatchResearch(
-		name: string,
-		description: string,
-		profile: 'stock_analysis' | 'general_research'
-	): Record<string, unknown> {
+	dispatchResearch(name: string, description: string): Record<string, unknown> {
 		const slotIndex = this.session.researchSlots.findIndex((s) => s === null);
 		if (slotIndex === -1) {
 			return { status: 'rejected', reason: 'research_slots_full', free_research_slots_remaining: 0 };
@@ -120,10 +141,10 @@ export class TaskManager {
 		this.abortControllers.set(taskId, controller);
 
 		this.metrics.researchDispatched++;
-		this.log.info('Research dispatched', { taskId, name, profile });
+		this.log.info('Research dispatched', { taskId, name });
 		this._sendResearchStatus(taskId, name, 'started');
 
-		this._runResearch(task, slotIndex, profile, controller.signal);
+		this._runResearch(task, slotIndex, controller.signal);
 
 		return {
 			taskId,
@@ -133,15 +154,27 @@ export class TaskManager {
 		};
 	}
 
-	private _runResearch(
-		task: Task,
-		slotIndex: number,
-		profile: 'stock_analysis' | 'general_research',
-		signal: AbortSignal
-	): void {
+	// A quick_search runs inline (not through a research slot): it's fast and
+	// cheap, and the live agent awaits the answer rather than being pinged later.
+	async quickSearch(query: string): Promise<Record<string, unknown>> {
+		const taskId = uuidv4();
+		this.log.info('Quick search dispatched', { taskId, query: query.slice(0, 120) });
+		try {
+			const { answer, usage } = await runQuickSearch(query);
+			this.tokens.recordResearch(taskId, 'quick_search', usage, 'quick');
+			this.log.info('Quick search completed', { taskId });
+			return { status: 'ok', answer };
+		} catch (err: unknown) {
+			const error = err instanceof Error ? err : new Error(String(err));
+			this.log.error('Quick search failed', { taskId, error });
+			return { status: 'error', error: error.message };
+		}
+	}
+
+	private _runResearch(task: Task, slotIndex: number, signal: AbortSignal): void {
 		const { taskId, name, description } = task;
 
-		runResearchAgent(profile, description, signal)
+		runResearchAgent(description, signal)
 			.then(({ result, usage }) => {
 				if (this.session.cancelledTasks.has(taskId)) {
 					this.log.debug('Research result discarded — task was cancelled', { taskId });
@@ -149,7 +182,7 @@ export class TaskManager {
 				}
 				(this.session.researchSlots as Array<Task | null>)[slotIndex] = null;
 				this.abortControllers.delete(taskId);
-				this.tokens.recordResearch(taskId, name, usage);
+				this.tokens.recordResearch(taskId, name, usage, 'deep');
 				const body = JSON.stringify(result);
 				const MAX = 10_000;
 				const trimmed = body.length > MAX ? body.slice(0, MAX) + '\n[...truncated]' : body;
@@ -439,6 +472,10 @@ export class TaskManager {
 		const { taskId, name, description } = task;
 		const MAX_STEPS = 20;
 
+		// Results of the previous turn's actions, fed back as tool_results on the
+		// next observation. Undefined on the first turn.
+		let lastActionResults: WebObservation['actionResults'];
+
 		while (memory.stepCount < MAX_STEPS) {
 			if (this._isCancelled(taskId, task, 'before observation', memory.stepCount)) return;
 
@@ -461,9 +498,12 @@ export class TaskManager {
 				screenshot: obsMsg.screenshot,
 				width: obsMsg.width,
 				height: obsMsg.height,
+				cssWidth: obsMsg.cssWidth,
+				cssHeight: obsMsg.cssHeight,
 				url: obsMsg.url,
 				title: obsMsg.title,
 				scrollRegions: obsMsg.scrollRegions,
+				actionResults: lastActionResults,
 			};
 
 			const { step, usage } = await runWebAgentStep(memory, observation);
@@ -471,21 +511,35 @@ export class TaskManager {
 
 			if (this._isCancelled(taskId, task, 'after agent step', memory.stepCount)) return;
 
-			const results: AgentActionResult[] = [];
-			let terminal: AgentAction | null = null;
+			// The model's coords are in image space; CDP dispatch and DOM reads
+			// need CSS pixels. Scale every action down by cssWidth/imageWidth
+			// (a no-op on dpr-1 displays where image == CSS size).
+			const coordScale = obsMsg.width > 0 ? obsMsg.cssWidth / obsMsg.width : 1;
+			if (coordScale !== 1) {
+				step.actions = step.actions.map((a) => scaleAction(a, coordScale));
+			}
 
-			for (const action of step.actions) {
-				if (TERMINAL_VARIANTS.has(action.variant)) {
-					terminal = action;
-					break;
+			// Execute this turn's actions. EVERY tool_use id must get exactly one
+			// tool_result next turn or the API rejects the message, so we emit a
+			// result for each — real for executed actions, a "skipped" note for
+			// any dropped after an earlier failure ended the batch.
+			lastActionResults = [];
+			let batchFailed = false;
+			for (let i = 0; i < step.actions.length; i++) {
+				const action = step.actions[i];
+				const toolUseId = step.toolUseIds[i];
+
+				if (batchFailed) {
+					lastActionResults.push({ toolUseId, ok: false, error: 'skipped — a prior action in this batch failed' });
+					continue;
 				}
 
 				const result = await this._executeAction(taskId, action);
-				results.push({
-					variant: action.variant,
-					result: result.success ? 'ok' : 'failed',
+				lastActionResults.push({
+					toolUseId,
+					ok: result.success,
 					...(result.error ? { error: result.error } : {}),
-					...(result.data !== undefined ? { data: result.data } : {}),
+					...(result.data !== undefined ? { text: result.data } : {}),
 				});
 				this.metrics.automationSteps++;
 
@@ -499,55 +553,55 @@ export class TaskManager {
 
 				if (this._isCancelled(taskId, task, 'after action', memory.stepCount)) return;
 
-				if (!result.success) {
-					// First failure ends the batch — agent sees the failure next turn.
-					break;
-				}
+				if (!result.success) batchFailed = true; // stop executing; still record the rest as skipped
 			}
 
-			memory.recordTurn(step.reasoning, step.progress_note, step.page_changed, step.actions, results);
+			// Answer any tool_use that produced no browser action (e.g. a bare
+			// screenshot request). Without a result the API rejects the next turn.
+			// The fresh screenshot rides in the observation the loop sends anyway.
+			for (const toolUseId of step.noopToolUseIds) {
+				lastActionResults.push({ toolUseId, ok: true, text: 'Screenshot follows.' });
+			}
 
-			// Hard stop for no-progress loops: the notice fires at 2 (see
-			// WebAgentMemory); if the agent repeats the same no-op a 3rd time,
-			// the run is going nowhere — fail it. A terminal action this turn
-			// takes precedence — the agent is ending anyway.
-			if (!terminal && memory.noProgressStreak >= 3) {
+			memory.recordTurn(step.reasoning, step.actions);
+
+			// Hard stop for no-progress loops: WebAgentMemory warns at 2 repeated
+			// dead pointer actions; a 3rd means the run is going nowhere. A
+			// terminal this turn takes precedence — the agent is ending anyway.
+			if (!step.terminal && memory.noProgressStreak >= 3) {
 				this._failAutomation(
 					task,
 					memory,
-					'Stuck: 3 consecutive batches produced no page change',
+					'Stuck: 3 consecutive pointer actions produced no change',
 					'no_progress_loop',
 					memory.stepCount
 				);
 				return;
 			}
 
-			if (terminal) {
+			if (step.terminal) {
 				this.session.automationSlot = null;
 				this.abortControllers.delete(taskId);
 
 				const progressLog = memory.renderProgressLog();
 
-				// End the run, give the SPA a beat to finish async loads, then put
-				// a FRESH screenshot in front of Gemini before the announcement —
-				// so it reports the current screen, not a stale mid-flight frame.
+				// End the run. We deliberately do NOT push a screenshot to the live
+				// agent here — a handed frame is a secondhand crutch it would
+				// describe instead of looking. If the user needs the current screen,
+				// the live agent enables its own vision (see <Async_Returns>).
 				this._sendAutomationEnd(
 					taskId,
-					terminal.variant === 'task:done' ? 'complete' : 'error',
-					terminal.variant === 'task:fail' ? terminal.reason : undefined
+					step.terminal.kind === 'done' ? 'complete' : 'error',
+					step.terminal.kind === 'fail' ? step.terminal.reason : undefined
 				);
-				await new Promise<void>((r) => setTimeout(r, 2_500));
-				const freshFrame = await this._requestScreenshot();
-				if (freshFrame) this.gemini.sendVideoFrame(freshFrame);
 
-				if (terminal.variant === 'task:done') {
-					// The frame's provenance rides in the message so the model can
-					// reason about it (mid-load capture) instead of trusting it blindly.
-					const frameNote = freshFrame
-						? '\nA screenshot of the end state was just added to your visual context. It was captured moments after the run ended — if it looks blank or still loading, take a fresh one before reporting.'
-						: '';
+				if (step.terminal.kind === 'done') {
+					// Mechanical outcome only — the web agent's own description of what
+					// it saw is deliberately NOT forwarded. "It ran" is not "here's
+					// what's on screen"; if the user needs the current state, the live
+					// agent must confirm with its own vision (see <Async_Returns>).
 					this.gemini.injectContent(
-						`[automation context] Task "${name}" completed in ${memory.stepCount} step(s).\nCompleted at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nEvidence: ${terminal.evidence}${frameNote}\nautomation_slot_freed: true`,
+						`[automation context] Task "${name}" finished its run in ${memory.stepCount} step(s).\nCompleted at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nThe run reached its end; whatever is on the user's screen now is the result. This is a mechanical outcome, not a description of the screen — if the user needs to know what's showing, look with your own vision.\nautomation_slot_freed: true`,
 						{ kind: 'result' }
 					);
 					this.metrics.automationCompleted++;
@@ -557,9 +611,9 @@ export class TaskManager {
 						steps: memory.stepCount,
 						durationMs: Date.now() - task.startedAt,
 					});
-				} else if (terminal.variant === 'task:fail') {
+				} else {
 					this.gemini.injectContent(
-						`[automation context] Task "${name}" could not be completed after ${memory.stepCount} step(s): ${terminal.reason}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nautomation_slot_freed: true`,
+						`[automation context] Task "${name}" could not be completed after ${memory.stepCount} step(s): ${step.terminal.reason}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}\n${progressLog}\nautomation_slot_freed: true`,
 						{ kind: 'result' }
 					);
 					this.metrics.automationFailed++;
@@ -568,7 +622,7 @@ export class TaskManager {
 						name,
 						reason: 'agent_declared_failure',
 						step: memory.stepCount,
-						declaredReason: terminal.reason,
+						declaredReason: step.terminal.reason,
 						durationMs: Date.now() - task.startedAt,
 					});
 				}
@@ -646,23 +700,39 @@ export class TaskManager {
 		return true;
 	}
 
-	cancel(name: string): Record<string, unknown> {
-		const researchSlotIndex = this.session.researchSlots.findIndex(
-			(s) => s?.name === name
-		);
-		const automationMatch =
-			this.session.automationSlot?.name === name ? this.session.automationSlot : null;
+	// Cancel running task(s). With a name, cancels that specific task. Without,
+	// cancels by scope ('all' by default) — every running research task and/or
+	// the automation. Name-optional so the live agent can always stop work even
+	// if it doesn't recall the exact dispatch name.
+	cancel(name?: string, scope: 'all' | 'research' | 'automation' = 'all'): Record<string, unknown> {
+		const running: Task[] = [
+			...this.session.researchSlots.filter((s): s is Task => s !== null),
+			...(this.session.automationSlot ? [this.session.automationSlot] : []),
+		];
 
-		const task =
-			researchSlotIndex !== -1
-				? this.session.researchSlots[researchSlotIndex]
-				: automationMatch;
-
-		if (!task) {
-			return { status: 'not_found', reason: 'no_running_task_with_that_name' };
+		let targets: Task[];
+		if (name) {
+			targets = running.filter((t) => t.name === name);
+			if (targets.length === 0) {
+				return { status: 'not_found', reason: 'no_running_task_with_that_name' };
+			}
+		} else {
+			targets = running.filter(
+				(t) => scope === 'all' || t.type === scope
+			);
+			if (targets.length === 0) {
+				return { status: 'nothing_to_cancel', scope };
+			}
 		}
 
-		const taskId = task.taskId;
+		const cancelled = targets.map((t) => this._cancelTask(t));
+		return { status: 'cancelled', cancelled };
+	}
+
+	// Tear down one running task: mark cancelled, abort its request/loop, and
+	// resolve any promises it's blocked on so it unwinds promptly.
+	private _cancelTask(task: Task): string {
+		const { taskId, name } = task;
 		this.session.cancelledTasks.add(taskId);
 		this.abortControllers.get(taskId)?.abort();
 		this.abortControllers.delete(taskId);
@@ -673,22 +743,24 @@ export class TaskManager {
 			observationResolve(null);
 		}
 
-		for (const [actionId, resolve] of this.pendingActionResults) {
-			resolve(null);
-			this.pendingActionResults.delete(actionId);
-		}
-
-		for (const [requestId, resolve] of this.pendingScreenshots) {
-			resolve('');
-			this.pendingScreenshots.delete(requestId);
-		}
-
-		if (researchSlotIndex !== -1) {
-			(this.session.researchSlots as Array<Task | null>)[researchSlotIndex] = null;
+		if (task.type === 'automation') {
+			for (const [actionId, resolve] of this.pendingActionResults) {
+				resolve(null);
+				this.pendingActionResults.delete(actionId);
+			}
+			for (const [requestId, resolve] of this.pendingScreenshots) {
+				resolve('');
+				this.pendingScreenshots.delete(requestId);
+			}
+		} else {
+			const slotIndex = this.session.researchSlots.findIndex((s) => s?.taskId === taskId);
+			if (slotIndex !== -1) {
+				(this.session.researchSlots as Array<Task | null>)[slotIndex] = null;
+			}
 			this._sendResearchStatus(taskId, name, 'cancelled');
 		}
 
-		this.log.info('Task cancelled', { taskId, name });
-		return { status: 'cancelled', name };
+		this.log.info('Task cancelled', { taskId, name, type: task.type });
+		return name;
 	}
 }

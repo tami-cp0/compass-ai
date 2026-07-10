@@ -49,6 +49,7 @@ const apiSessions = new Map<string, ApiSession>();
 function emitSessionSummary(sessionId: string, apiSession: ApiSession, closeCode?: number, closeReason?: string): void {
 	const log = sessionLogger(sessionId);
 	const m = apiSession.taskManager.metrics;
+	const t = apiSession.taskManager.tokens.summary();
 	log.info('Session summary', {
 		durationMs: Date.now() - apiSession.startedAt,
 		toolCalls: apiSession.gemini.toolCallCount,
@@ -59,6 +60,15 @@ function emitSessionSummary(sessionId: string, apiSession: ApiSession, closeCode
 		automationCompleted: m.automationCompleted,
 		automationFailed: m.automationFailed,
 		automationSteps: m.automationSteps,
+		// Token rollup (dev only; zeros in prod). Deep research vs quick_search
+		// are split, automation/live show cache savings, vision shows usage.
+		tokens: {
+			deepResearch: { count: t.researchDeep.count, total: t.researchDeep.totalTokens },
+			quickSearch: { count: t.researchQuick.count, total: t.researchQuick.totalTokens },
+			automation: { runs: t.automation.runs, steps: t.automation.steps, total: t.automation.totalTokens, cached: t.automation.cachedInputTokens },
+			live: { calls: t.live.calls, total: t.live.totalTokens, cached: t.live.cachedInputTokens, frames: t.live.frameTokens },
+			vision: { timesEnabled: t.vision.enableCount, byMode: t.vision.byMode, framesSent: t.vision.framesSent },
+		},
 		...(closeCode !== undefined ? { closeCode, closeReason } : {}),
 	});
 }
@@ -160,11 +170,12 @@ export function startServer(): us_listen_socket | false {
 				const taskManager = new TaskManager(session, gemini);
 				apiSessions.set(sessionId, { sessionId, gemini, taskManager, startedAt: Date.now() });
 
-				gemini.onDispatchResearch = (name, desc, profile) =>
-					taskManager.dispatchResearch(name, desc, profile);
+				gemini.onDispatchResearch = (name, desc) =>
+					taskManager.dispatchResearch(name, desc);
+				gemini.onQuickSearch = (query) => taskManager.quickSearch(query);
 				gemini.onDispatchAutomation = (name, desc) =>
 					taskManager.dispatchAutomation(name, desc);
-				gemini.onCancelTask = (name) => taskManager.cancel(name);
+				gemini.onCancelTask = (name, scope) => taskManager.cancel(name, scope);
 				gemini.onSetPinPane = (title, rawMarkdown, width, height, columns, links) => {
 					// Server clamps only to absolute sanity limits. The extension
 					// further clamps width at render time to fit between the pill
@@ -263,6 +274,9 @@ export function startServer(): us_listen_socket | false {
 				send({ type: 'pin_pane_clear', sessionId });
 				const apiSession = apiSessions.get(sessionId);
 				if (apiSession) {
+					// Stop any in-flight research/automation so it doesn't run on
+					// orphaned after the client is gone.
+					apiSession.taskManager.cancel();
 					emitSessionSummary(sessionId, apiSession);
 					await apiSession.gemini.close();
 					apiSessions.delete(sessionId);
@@ -298,6 +312,11 @@ export function startServer(): us_listen_socket | false {
 				return;
 			}
 
+			if (msg.type === 'vision_frame') {
+				apiSession.taskManager.handleVisionFrame(msg);
+				return;
+			}
+
 			if (msg.type === 'screenshot_response') {
 				apiSession.taskManager.handleScreenshotResponse(msg);
 				return;
@@ -320,6 +339,9 @@ export function startServer(): us_listen_socket | false {
 			if (sessionId) {
 				const apiSession = apiSessions.get(sessionId);
 				if (apiSession) {
+					// Stop in-flight tasks — the client is gone, so any running
+					// automation/research would otherwise loop until it times out.
+					apiSession.taskManager.cancel();
 					emitSessionSummary(sessionId, apiSession, code);
 					await apiSession.gemini.close();
 					apiSessions.delete(sessionId);

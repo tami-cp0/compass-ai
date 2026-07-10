@@ -23,17 +23,23 @@ const BUFFER_POLL_MS    = 250
 // torn down and the user must click the pill again to start fresh.
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000]
 
-// Web-agent screenshots ship at CSS-pixel resolution (captureVisibleTab returns
-// physical pixels; we resample by 1/dpr once) so the model's coords map 1:1 to
-// what CDP dispatches.
+// Web-agent screenshots ship at physical resolution (capped at MAX_LONG_EDGE_PX
+// for the model's image limit). The model's coords come back in that image
+// space; the server scales them to CSS pixels for CDP dispatch.
 
 const DEBUGGER_PROTOCOL_VERSION = "1.3"
 
-// CDP timing — kept identical to pear's tested values
-const STABILITY_TIMEOUT_MS = 5000
-const SETTLE_MS = 300
+// CDP timing. Atlass navigates in-SPA (no document reload), so readyState is
+// often already "complete" and says nothing about whether the page's data has
+// loaded — the holdings table renders empty, then fills after an XHR. So after
+// readyState we wait for DOM QUIESCENCE: poll a cheap content signature and
+// only proceed once it stops changing for DOM_IDLE_MS, capped at
+// STABILITY_TIMEOUT_MS. This stops the agent screenshotting mid-fetch.
+const STABILITY_TIMEOUT_MS = 6000
+const DOM_POLL_MS = 150
+const DOM_IDLE_MS = 500
 const TOTAL_TYPING_DELAY_MS = 500
-const MOUSE_MOVE_STEPS = 20
+const MOUSE_MOVE_STEPS = 5
 const DRAG_HOLD_MS = 500
 
 const isMac =
@@ -60,6 +66,15 @@ let bufferPollTimer: ReturnType<typeof setInterval> | null = null
 let connectionStatus: ConnectionStatus = "ok"
 let highSince: number | null = null
 let lowSince:  number | null = null
+
+// Vision stream: while on, capture a frame every VISION_FRAME_MS and push it to
+// the server. 1 fps is the Live API's max useful rate. The server owns the
+// on/off lifetime (glance/sustained + hard cap); the extension just runs/stops
+// the loop. Structured so a "user speaking" flag could later throttle idle
+// frames — the server-side auto-off + cap already bound idle cost for now.
+const VISION_FRAME_MS = 1000
+let visionTimer: ReturnType<typeof setInterval> | null = null
+let visionCapturing = false
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -203,6 +218,17 @@ function connect() {
       return
     }
 
+    if (msg.type === "vision_start") {
+      startVision()
+      relayToSessionTab(msg) // pill vision indicator
+      return
+    }
+    if (msg.type === "vision_stop") {
+      stopVision()
+      relayToSessionTab(msg)
+      return
+    }
+
     if (msg.type === "page_data_request") {
       void handlePageDataRequest(msg.requestId, msg.box, msg.physicalPixels)
       return
@@ -214,6 +240,7 @@ function connect() {
   ws.onclose = () => {
     ws = null
     stopBufferWatch()
+    stopVision() // socket down — no frames until reconnect re-enables
     setConnectionStatus("disconnected")
     scheduleReconnect()
   }
@@ -226,6 +253,7 @@ function scheduleReconnect() {
     console.warn("[compass] reconnect attempts exhausted — tearing down session")
     sessionId = null
     sessionTabId = null
+    stopVision()
     void detachAgentDebugger()
     broadcastToAllTabs({ type: "pin_pane_clear", sessionId: "" })
     return
@@ -263,10 +291,17 @@ function sendRaw(message: OutboundExtensionMessage) {
 // ─── Screenshot capture + resize (service-worker safe) ───────────────────────
 
 interface CapturedFrame {
-  base64: string  // raw base64 PNG (no data: prefix)
-  width: number   // CSS-pixel width (= viewport width)
-  height: number  // CSS-pixel height (= viewport height)
+  base64: string   // raw base64 PNG (no data: prefix)
+  width: number    // image width in px (the space the model's coords are in)
+  height: number   // image height in px
+  cssWidth: number  // CSS viewport width (what CDP dispatch expects)
+  cssHeight: number // CSS viewport height
 }
+
+// Sonnet 5 accepts up to this many px on the long edge before the API
+// downscales. We capture at physical resolution (sharpest grounding) but cap
+// here so we never exceed it or upscale past what the display actually has.
+const MAX_LONG_EDGE_PX = 2576
 
 async function captureFromTab(tabId: number): Promise<CapturedFrame> {
   const tab = await chrome.tabs.get(tabId)
@@ -277,28 +312,34 @@ async function captureFromTab(tabId: number): Promise<CapturedFrame> {
   })
   if (!dataUrl) throw new Error("captureVisibleTab returned empty")
 
-  // viewport = physical pixels / dpr (CSS pixels)
-  const [, vw, vh] = await readViewport(tabId)
+  const [dpr, vw, vh] = await readViewport(tabId)
 
   // Source bitmap is at physical pixels (vw × dpr, vh × dpr).
   const sourceBlob = await (await fetch(dataUrl)).blob()
   const sourceBitmap = await createImageBitmap(sourceBlob)
 
-  // Output at CSS-pixel size (vw × vh). No cap. Coords the model emits map
-  // 1:1 to viewport CSS pixels, which is what CDP expects.
-  const canvas = new OffscreenCanvas(vw, vh)
+  // Output at physical resolution for the sharpest detail the model is allowed
+  // to see, but never above MAX_LONG_EDGE_PX (else the API downscales and we
+  // lose the scale factor). The model's coords come back in this image space;
+  // the server scales them to CSS pixels for CDP using cssWidth/cssHeight.
+  const physW = Math.round(vw * dpr)
+  const physH = Math.round(vh * dpr)
+  const longEdge = Math.max(physW, physH)
+  const scale = longEdge > MAX_LONG_EDGE_PX ? MAX_LONG_EDGE_PX / longEdge : 1
+  const outW = Math.max(1, Math.round(physW * scale))
+  const outH = Math.max(1, Math.round(physH * scale))
+
+  const canvas = new OffscreenCanvas(outW, outH)
   const ctx = canvas.getContext("2d")
   if (!ctx) throw new Error("Failed to acquire 2D canvas context")
-  // Smoothing on — better for non-integer dpr downscales (e.g. 1.5); a no-op
-  // when dpr is 1 or 2.
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = "high"
-  ctx.drawImage(sourceBitmap, 0, 0, vw, vh)
+  ctx.drawImage(sourceBitmap, 0, 0, outW, outH)
 
   const outBlob = await canvas.convertToBlob({ type: "image/png" })
   const base64 = await blobToBase64(outBlob)
 
-  return { base64, width: vw, height: vh }
+  return { base64, width: outW, height: outH, cssWidth: vw, cssHeight: vh }
 }
 
 async function readViewport(tabId: number): Promise<[number, number, number]> {
@@ -349,25 +390,60 @@ async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary)
 }
 
-// Gemini Live screenshot tool. The live model emits no coordinates, so it skips
-// the CSS-pixel downscale captureFromTab does for the web agent — raw
-// physical-resolution PNG, for maximum detail.
+// Gemini Live screenshot tool. The live model emits no coordinates, so it needs
+// no coordinate space — send the raw physical-resolution PNG for maximum detail
+// (captureFromTab, used by the web agent, caps and tracks scale for its coords).
 async function handleGeminiScreenshotRequest(requestId: string): Promise<void> {
   try {
     if (sessionTabId === null) {
       sendRaw({ type: "screenshot_response", requestId, dataUrl: "" })
       return
     }
-    const tab = await chrome.tabs.get(sessionTabId)
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })
-    if (!dataUrl) throw new Error("captureVisibleTab returned empty")
-    // Strip the data: prefix — the server/model wants raw base64.
-    const base64 = dataUrl.replace(/^data:image\/png;base64,/, "")
+    const base64 = await captureRawFrame()
     sendRaw({ type: "screenshot_response", requestId, dataUrl: base64 })
   } catch (err) {
     console.error("[compass] gemini screenshot failed:", err)
     sendRaw({ type: "screenshot_response", requestId, dataUrl: "" })
   }
+}
+
+// Capture the current tab as a raw physical-resolution PNG (base64, no prefix).
+// Shared by the one-shot screenshot tool and the continuous vision loop — the
+// live model uses no coordinates, so full detail beats downscaling.
+async function captureRawFrame(): Promise<string> {
+  if (sessionTabId === null) throw new Error("no session tab")
+  const tab = await chrome.tabs.get(sessionTabId)
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })
+  if (!dataUrl) throw new Error("captureVisibleTab returned empty")
+  return dataUrl.replace(/^data:image\/png;base64,/, "")
+}
+
+// ─── Vision stream ───────────────────────────────────────────────────────────
+
+function startVision(): void {
+  if (visionTimer !== null) return // already streaming
+  const tick = async () => {
+    if (visionCapturing || sessionTabId === null) return
+    visionCapturing = true
+    try {
+      const data = await captureRawFrame()
+      if (data) sendRaw({ type: "vision_frame", data })
+    } catch (err) {
+      console.error("[compass] vision frame failed:", err)
+    } finally {
+      visionCapturing = false
+    }
+  }
+  void tick() // first frame immediately, don't wait a full interval
+  visionTimer = setInterval(() => void tick(), VISION_FRAME_MS)
+}
+
+function stopVision(): void {
+  if (visionTimer !== null) {
+    clearInterval(visionTimer)
+    visionTimer = null
+  }
+  visionCapturing = false
 }
 
 // ─── Page data extraction (read_page_data tool) ──────────────────────────────
@@ -477,6 +553,8 @@ async function handleObservationRequest(taskId: string): Promise<void> {
       screenshot: frame.base64,
       width: frame.width,
       height: frame.height,
+      cssWidth: frame.cssWidth,
+      cssHeight: frame.cssHeight,
       url: tab.url ?? "",
       title: tab.title ?? "",
       scrollRegions,
@@ -489,6 +567,8 @@ async function handleObservationRequest(taskId: string): Promise<void> {
       screenshot: "",
       width: 0,
       height: 0,
+      cssWidth: 0,
+      cssHeight: 0,
       url: "",
       title: "",
     })
@@ -784,23 +864,50 @@ async function typeContent(tabId: number, content: string): Promise<void> {
   }
 }
 
+// A cheap content signature: readyState + element count + text length + a
+// coarse hash of visible text. Changes while data streams in and layout shifts;
+// stabilizes once the page has settled. Evaluated in-page via CDP.
+const DOM_SIGNATURE_EXPR = `(() => {
+  const el = document.body ? document.body.getElementsByTagName('*').length : 0;
+  const t = document.body ? document.body.innerText : '';
+  let h = 0;
+  for (let i = 0; i < t.length; i++) { h = (h * 31 + t.charCodeAt(i)) | 0; }
+  return document.readyState + ':' + el + ':' + t.length + ':' + h;
+})()`
+
+async function domSignature(tabId: number): Promise<string | null> {
+  try {
+    const r = await sendCDP<{ result: { value: string } }>(tabId, "Runtime.evaluate", {
+      expression: DOM_SIGNATURE_EXPR,
+      returnByValue: true,
+    })
+    return r.result.value
+  } catch {
+    return null
+  }
+}
+
+// Wait until the page is loaded AND its content has stopped changing. readyState
+// alone fires before SPA data lands, so we additionally require the DOM
+// signature to hold steady for DOM_IDLE_MS. Bounded by `timeout` so a page that
+// never settles (animations, polling widgets) can't hang the loop.
 async function waitForStability(tabId: number, timeout = STABILITY_TIMEOUT_MS): Promise<void> {
   const start = Date.now()
+  let last: string | null = null
+  let steadySince = 0
+
   while (Date.now() - start < timeout) {
-    let ready: string | undefined
-    try {
-      const r = await sendCDP<{ result: { value: string } }>(tabId, "Runtime.evaluate", {
-        expression: "document.readyState",
-        returnByValue: true,
-      })
-      ready = r.result.value
-    } catch {
-      ready = undefined
+    const sig = await domSignature(tabId)
+    const ready = sig ? sig.startsWith("complete") : false
+
+    if (sig !== null && sig === last) {
+      if (ready && steadySince && Date.now() - steadySince >= DOM_IDLE_MS) return
+    } else {
+      steadySince = Date.now() // changed (or first read) — reset the steady clock
     }
-    if (ready === "complete") break
-    await sleep(100)
+    last = sig
+    await sleep(DOM_POLL_MS)
   }
-  await sleep(SETTLE_MS)
 }
 
 async function handleAction(taskId: string, actionId: string, action: AgentAction): Promise<void> {
@@ -959,6 +1066,7 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage, sender, _sendResponse) => {
   if (message.type === "session_end") {
     sessionTabId = null
+    stopVision()
     void detachAgentDebugger()
     broadcastToAllTabs({ type: "pin_pane_clear", sessionId: sessionId || "" })
   } else if (sender.tab?.id !== undefined && sessionTabId === null) {
