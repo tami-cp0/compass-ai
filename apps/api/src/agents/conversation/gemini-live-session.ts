@@ -154,28 +154,28 @@ export class GeminiLiveSession {
 			},
 		});
 
-		// Ground the model with the current screen from turn one so its first
-		// action isn't blind. Frame first, then a caption (turnComplete:false —
-		// pure context, no speech).
-		if (this.onRequestScreenshot) {
-			this.onRequestScreenshot()
-				.then((dataUrl) => {
-					if (dataUrl) {
-						this.sendVideoFrame(dataUrl);
-						this.session?.sendClientContent({
-							turns: [{
-								role: 'user',
-								parts: [{ text: '[context] The image just shared is a screenshot of the page currently on the user\'s screen. This is what they are looking at right now. The user has not spoken yet — this is context only; do not respond, greet, or describe it. Wait for them to speak.' }],
-							}],
-							turnComplete: false,
-						});
-						this.log.info('[session-start] initial screenshot sent');
-					}
-				})
-				.catch(() => {
-					/* best-effort; the model can still request one itself */
-				});
-		}
+		// Session-start grounding screenshot — DISABLED for now (2026-07-16).
+		// The model starts blind and enables its own vision when it needs to see.
+		// Re-enable by uncommenting; onRequestScreenshot is still wired.
+		// if (this.onRequestScreenshot) {
+		// 	this.onRequestScreenshot()
+		// 		.then((dataUrl) => {
+		// 			if (dataUrl) {
+		// 				this.sendVideoFrame(dataUrl);
+		// 				this.session?.sendClientContent({
+		// 					turns: [{
+		// 						role: 'user',
+		// 						parts: [{ text: '[context] The image just shared is a screenshot of the page currently on the user\'s screen. This is what they are looking at right now. The user has not spoken yet — this is context only; do not respond, greet, or describe it. Wait for them to speak.' }],
+		// 					}],
+		// 					turnComplete: false,
+		// 				});
+		// 				this.log.info('[session-start] initial screenshot sent');
+		// 			}
+		// 		})
+		// 		.catch(() => {
+		// 			/* best-effort; the model can still request one itself */
+		// 		});
+		// }
 	}
 
 	private formatHistoryContext(): string {
