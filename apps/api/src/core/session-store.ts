@@ -6,7 +6,7 @@ export function createSession(sessionId: string, send: (msg: ServerMessage) => v
   const session: SessionState = {
     sessionId,
     send,
-    researchSlots:  [null, null],
+    researchSlots:  [null],
     automationSlot: null,
     cancelledTasks: new Set(),
   }

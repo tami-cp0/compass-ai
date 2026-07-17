@@ -8,13 +8,13 @@ import { player } from "../lib/audio-runtime"
 type StripSessionId<T> = T extends { sessionId: string } ? Omit<T, "sessionId"> : T
 type OutboundExtensionMessage = StripSessionId<ExtensionMessage>
 
-export interface PendingConfirmation {
-  actionId:    string
-  taskId:      string
-  description: string
-}
-
 export type ConnectionStatus = "ok" | "degraded" | "disconnected"
+
+export interface ResearchTask {
+  taskId: string
+  name:   string
+  status: "started" | "completed" | "failed" | "cancelled"
+}
 
 export interface UseSession {
   active:              boolean
@@ -22,19 +22,22 @@ export interface UseSession {
   // to offline. Used by the UI to keep showing the "in-session" layout.
   wantSession:         boolean
   isAutomationRunning: boolean
-  confirmation:        PendingConfirmation | null
+  researchTasks:       ResearchTask[]
+  // The live agent has its vision (continuous screen view) turned on.
+  isVisionOn:          boolean
   connectionStatus:    ConnectionStatus
   isOffline:           boolean
   toggle:              () => void
 }
 
 // Orchestrates a Compass voice session: PCM capture lifecycle, background
-// runtime messaging, and the automation / confirmation state surfaced
-// through inbound ServerMessages.
+// runtime messaging, and the automation state surfaced through inbound
+// ServerMessages.
 export function useSession(): UseSession {
   const [active,              setActive]              = useState(false)
   const [isAutomationRunning, setIsAutomationRunning] = useState(false)
-  const [confirmation,        setConfirmation]        = useState<PendingConfirmation | null>(null)
+  const [researchTasks,       setResearchTasks]       = useState<ResearchTask[]>([])
+  const [isVisionOn,          setIsVisionOn]          = useState(false)
   const [connectionStatus,    setConnectionStatus]    = useState<ConnectionStatus>("ok")
   const [isOffline,           setIsOffline]           = useState(typeof navigator !== "undefined" && !navigator.onLine)
   const [wantSession,         setWantSession]         = useState(false)
@@ -58,21 +61,50 @@ export function useSession(): UseSession {
         player.play(msg.data)
         return false
       }
-      if (msg.type === "action") {
+      // Either an action dispatch or an observation request is enough to
+      // know the agent is actively driving the page.
+      if (msg.type === "agent_action" || msg.type === "agent_observation_request") {
         setIsAutomationRunning(true)
-        return false
-      }
-      if (msg.type === "user_action_required") {
-        setConfirmation({ actionId: msg.actionId, taskId: msg.taskId, description: msg.description })
         return false
       }
       if (msg.type === "automation_end") {
         setIsAutomationRunning(false)
-        setConfirmation(null)
+        return false
+      }
+      if (msg.type === "research_status") {
+        setResearchTasks((prev) => {
+          if (msg.status === "started") {
+            if (prev.some((t) => t.taskId === msg.taskId)) return prev
+            return [...prev, { taskId: msg.taskId, name: msg.name, status: "started" }]
+          }
+          return prev.map((t) => (t.taskId === msg.taskId ? { ...t, status: msg.status } : t))
+        })
+        // End states just fade out (400ms animation), then drop.
+        if (msg.status !== "started") {
+          setTimeout(() => {
+            setResearchTasks((prev) => prev.filter((t) => t.taskId !== msg.taskId))
+          }, 500)
+        }
+        return false
+      }
+      if (msg.type === "vision_start") {
+        setIsVisionOn(true)
+        return false
+      }
+      if (msg.type === "vision_stop") {
+        setIsVisionOn(false)
         return false
       }
       if (msg.type === "connection_status") {
         setConnectionStatus(msg.status)
+        // Server can't deliver automation_end or research_status through a
+        // dead socket, so the UI would otherwise stay stuck on running
+        // indicators forever.
+        if (msg.status === "disconnected") {
+          setIsAutomationRunning(false)
+          setResearchTasks([])
+          setIsVisionOn(false)
+        }
         return false
       }
       return false
@@ -108,6 +140,8 @@ export function useSession(): UseSession {
   // Gemini session and deletes the resumption handle.
   const stopSession = useCallback(() => {
     setWantSession(false)
+    setResearchTasks([])
+    setIsVisionOn(false)
     chrome.runtime.sendMessage({ type: "session_end" })
     teardownCapture()
   }, [teardownCapture])
@@ -137,5 +171,5 @@ export function useSession(): UseSession {
     }
   }, [isOffline, wantSession, teardownCapture, startSession])
 
-  return { active, wantSession, isAutomationRunning, confirmation, connectionStatus, isOffline, toggle }
+  return { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, toggle }
 }

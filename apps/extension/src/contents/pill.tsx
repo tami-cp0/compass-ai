@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react"
 import { CompassIcon } from "./components/compass-icon"
 import { FrequencyBars } from "./components/frequency-bars"
 import { ReconnectingIcon } from "./components/reconnecting-icon"
+import { ResearchChips } from "./components/research-chips"
+import { VisionChip } from "./components/vision-chip"
 import { useSession } from "./hooks/use-session"
 import { createEdgeGlow, type EdgeGlowHandle } from "./lib/edge-glow"
 import { derivePillView } from "./lib/pill-view"
@@ -23,7 +25,7 @@ const SLOW_TO_RECONNECTING_MS = 5_000
 const OFFLINE_FLASH_MS        = 5_000
 
 const Pill = () => {
-  const { active, wantSession, isAutomationRunning, connectionStatus, isOffline, toggle } = useSession()
+  const { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, toggle } = useSession()
   const [showActive, setShowActive] = useState(false)
   const [degradedAged, setDegradedAged] = useState(false)
   const [offlineFlash, setOfflineFlash] = useState(false)
@@ -114,6 +116,8 @@ const Pill = () => {
           </div>
         )}
       </button>
+      <VisionChip on={isVisionOn} />
+      <ResearchChips tasks={researchTasks} />
     </div>
   )
 }

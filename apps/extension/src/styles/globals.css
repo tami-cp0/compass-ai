@@ -158,6 +158,79 @@
   to   { opacity: 1; }
 }
 
+/* =============================================
+   RESEARCH CHIPS — one per running background research task
+   ============================================= */
+
+.research-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  overflow: hidden;
+  color: hsla(0, 0%, 100%, 0.92);
+  /* Same green glass as the active pill. */
+  background: linear-gradient(
+    135deg,
+    hsla(161, 65%, 20%, 0.6) 0%,
+    hsla(161, 65%, 30%, 0.4) 40%,
+    hsla(161, 65%, 40%, 0.5) 60%,
+    hsla(161, 65%, 15%, 0.6) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
+    inset 0 -1px 0 hsla(161, 65%, 10%, 0.4),
+    0 4px 16px hsla(161, 65%, 30%, 0.4);
+}
+
+/* Running: a soft glass reflection sweeping across the chip — the same
+   shine language as the pill label. Icon and chip stay at full opacity. */
+.research-chip::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    115deg,
+    transparent 30%,
+    hsla(0, 0%, 100%, 0.22) 48%,
+    hsla(0, 0%, 100%, 0.30) 50%,
+    hsla(0, 0%, 100%, 0.22) 52%,
+    transparent 70%
+  );
+  transform: translateX(-100%);
+  animation: chip-shine 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes chip-shine {
+  0%   { transform: translateX(-100%); }
+  55%  { transform: translateX(100%); }
+  100% { transform: translateX(100%); }
+}
+
+/* Any end state: just fade out. Gemini already has the outcome in context —
+   the chip doesn't need to editorialize. */
+.research-chip.completed,
+.research-chip.failed,
+.research-chip.cancelled {
+  animation: chip-fade-out 400ms ease forwards;
+}
+
+.research-chip.completed::after,
+.research-chip.failed::after,
+.research-chip.cancelled::after {
+  animation: none;
+  opacity: 0;
+}
+
+@keyframes chip-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
 .spin-slow {
   animation: spin-slow 6s linear infinite;
   transform-origin: center;

@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "plasmo dev",
     "build": "plasmo build",
+    "vendor:markdown": "esbuild src/vendor/markdown-entry.mjs --bundle --format=esm --platform=browser --external:react --external:react/jsx-runtime --outfile=src/vendor/react-markdown.js",
     "package": "plasmo package"
   },
   "dependencies": {
@@ -16,8 +17,8 @@
     "plasmo": "0.90.5",
     "react": "18.2.0",
     "react-dom": "18.2.0",
-    "react-markdown": "^8.0.7",
-    "remark-gfm": "^3.0.1"
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@ianvs/prettier-plugin-sort-imports": "4.1.1",
@@ -26,6 +27,7 @@
     "@types/react": "18.2.48",
     "@types/react-dom": "18.2.18",
     "autoprefixer": "^10.5.0",
+    "esbuild": "^0.28.1",
     "postcss": "^8.5.15",
     "prettier": "3.2.4",
     "sharp": "^0.34.5",
@@ -38,7 +40,9 @@
     ],
     "permissions": [
       "tabs",
-      "activeTab"
+      "activeTab",
+      "debugger",
+      "scripting"
     ],
     "action": {}
   }

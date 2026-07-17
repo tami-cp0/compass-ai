@@ -43,10 +43,11 @@ export function derivePillView(input: PillViewInputs): PillView {
 
   const showBarsLayout = pillState === "active" || pillState === "slow" || (pillState === "offline" && wantSession)
 
-  // Bars animate only when truly active+ok; flatline elsewhere inside the bars
-  // layout. Idle offline flash uses the icon layout, so barsMode stays "idle".
+  // Bars follow Compass's voice output, and only when the session is truly
+  // active+ok; flatline elsewhere inside the bars layout. Idle offline flash
+  // uses the icon layout, so barsMode stays "idle".
   const barsMode: BarsMode =
-    pillState === "active" && active && showActive                                  ? "mic"
+    pillState === "active" && active && showActive                                  ? "voice"
     : showActive && (pillState === "slow" || (pillState === "offline" && wantSession)) ? "flatline"
     : "idle"
 

@@ -11,30 +11,40 @@ export type ExtensionMessage = {
     data: string;
     mimeType: "audio/pcm";
 } | {
-    type: "dom_snapshot";
-    sessionId: string;
-    taskId: string;
-    taskType: DomTaskType;
-    screenshot: string;
-    elementMap: string;
-} | {
-    type: "action_result";
-    sessionId: string;
-    actionId: string;
-    taskId: string;
-    success: boolean;
-    error?: string;
-} | {
-    type: "user_action_result";
-    sessionId: string;
-    actionId: string;
-    taskId: string;
-    confirmed: boolean;
-} | {
     type: "screenshot_response";
     sessionId: string;
     requestId: string;
     dataUrl: string;
+} | {
+    type: "page_data_response";
+    sessionId: string;
+    requestId: string;
+    data: string;
+    truncated: boolean;
+    error?: string;
+} | {
+    type: "agent_observation";
+    sessionId: string;
+    taskId: string;
+    screenshot: string;
+    width: number;
+    height: number;
+    cssWidth: number;
+    cssHeight: number;
+    url: string;
+    title: string;
+    scrollRegions?: ScrollRegion[];
+} | {
+    type: "agent_action_result";
+    sessionId: string;
+    taskId: string;
+    actionId: string;
+    success: boolean;
+    error?: string;
+} | {
+    type: "vision_frame";
+    sessionId: string;
+    data: string;
 };
 export type ServerMessage = {
     type: "audio_chunk";
@@ -42,36 +52,24 @@ export type ServerMessage = {
     data: string;
     mimeType: "audio/pcm";
 } | {
-    type: "action";
-    sessionId: string;
-    actionId: string;
-    taskId: string;
-    intent: WebIntent;
-    isCritical: boolean;
-} | {
-    type: "dom_snapshot_request";
-    sessionId: string;
-    taskId: string;
-    taskType: DomTaskType;
-} | {
-    type: "automation_end";
-    sessionId: string;
-    taskId: string;
-    reason: "complete" | "cancelled" | "error";
-    error?: string;
-} | {
-    type: "user_action_required";
-    sessionId: string;
-    actionId: string;
-    taskId: string;
-    description: string;
-} | {
     type: "session_init";
     sessionId: string;
 } | {
     type: "screenshot_request";
     sessionId: string;
     requestId: string;
+} | {
+    type: "page_data_request";
+    sessionId: string;
+    requestId: string;
+    box: Box;
+    physicalPixels: boolean;
+} | {
+    type: "research_status";
+    sessionId: string;
+    taskId: string;
+    name: string;
+    status: "started" | "completed" | "failed" | "cancelled";
 } | {
     type: "connection_status";
     status: "ok" | "degraded" | "disconnected";
@@ -82,47 +80,123 @@ export type ServerMessage = {
     markdown: string;
     width: number;
     height: number;
+    columns?: number;
+    links?: PaneLink[];
 } | {
     type: "pin_pane_clear";
     sessionId: string;
+} | {
+    type: "pin_pane_minimize";
+    sessionId: string;
+} | {
+    type: "agent_observation_request";
+    sessionId: string;
+    taskId: string;
+} | {
+    type: "agent_action";
+    sessionId: string;
+    taskId: string;
+    actionId: string;
+    action: AgentAction;
+} | {
+    type: "automation_end";
+    sessionId: string;
+    taskId: string;
+    reason: "complete" | "cancelled" | "error";
+    error?: string;
+} | {
+    type: "vision_start";
+    sessionId: string;
+} | {
+    type: "vision_stop";
+    sessionId: string;
 };
-export type DomTaskType = "click" | "form" | "read" | "structure";
-export interface WebAction {
-    action: 'click' | 'type' | 'scroll' | 'highlight';
-    element_id: number | null;
-    value: string | null;
-    direction: 'up' | 'down' | 'left' | 'right' | null;
-    amount: number | null;
-    text_snippet: string | null;
-    isCritical: boolean;
-    description: string;
+export interface PaneLink {
+    url: string;
+    title: string;
+    platform?: string;
 }
-export interface WebAgentStep {
-    reasoning: string;
-    next_action: WebAction | null;
-    is_complete: boolean;
-    is_failed: boolean;
+export interface ScrollRegion {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    canScrollDown: boolean;
+    canScrollUp: boolean;
+    canScrollLeft: boolean;
+    canScrollRight: boolean;
+    label?: string;
 }
-export interface StepRecord {
-    step_number: number;
-    action_description: string;
-    outcome: 'succeeded' | 'failed';
+export interface Box {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
 }
-export type WebIntent = {
-    action: "click";
-    element_id: number;
+export type AgentAction = {
+    variant: "mouse:click";
+    x: number;
+    y: number;
 } | {
-    action: "type";
-    element_id: number;
-    value: string;
+    variant: "mouse:double_click";
+    x: number;
+    y: number;
 } | {
-    action: "scroll";
-    element_id: number | null;
-    direction: "up" | "down" | "left" | "right";
-    amount: number;
+    variant: "mouse:right_click";
+    x: number;
+    y: number;
 } | {
-    action: "highlight";
-    element_id: number;
-    text_snippet: string;
+    variant: "mouse:drag";
+    from: {
+        x: number;
+        y: number;
+    };
+    to: {
+        x: number;
+        y: number;
+    };
+} | {
+    variant: "mouse:scroll";
+    x: number;
+    y: number;
+    deltaX: number;
+    deltaY: number;
+} | {
+    variant: "keyboard:type";
+    content: string;
+} | {
+    variant: "keyboard:enter";
+} | {
+    variant: "keyboard:tab";
+} | {
+    variant: "keyboard:backspace";
+} | {
+    variant: "keyboard:select_all";
+} | {
+    variant: "browser:nav";
+    url: string;
+} | {
+    variant: "browser:nav:back";
+} | {
+    variant: "browser:tab:switch";
+    index: number;
+} | {
+    variant: "browser:tab:new";
+} | {
+    variant: "wait";
+    seconds: number;
+} | {
+    variant: "page:read";
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+} | {
+    variant: "task:done";
+    evidence: string;
+} | {
+    variant: "task:fail";
+    reason: string;
 };
+export type ActionVariant = AgentAction["variant"];
 //# sourceMappingURL=messages.d.ts.map

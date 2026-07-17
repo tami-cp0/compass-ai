@@ -1,0 +1,127 @@
+diff --git a/lib/index.js b/lib/index.js
+index 68db7f9f1f201104cd9970078a524473cfc24acf..9834d4891ba1e256b559dcca85c7803724f6dea7 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,4 +1,4 @@
+-/**
++﻿/**
+  * @import {Node, Point, Position} from 'unist'
+  * @import {Options as MessageOptions} from 'vfile-message'
+  * @import {Compatible, Data, Map, Options, Value} from 'vfile'
+@@ -9,9 +9,9 @@
+  */
+ 
+ import {VFileMessage} from 'vfile-message'
+-import {minpath} from '#minpath'
+-import {minproc} from '#minproc'
+-import {urlToPath, isUrl} from '#minurl'
++import {minpath} from './minpath.browser.js'
++import {minproc} from './minproc.browser.js'
++import {urlToPath, isUrl} from './minurl.browser.js'
+ 
+ /**
+  * Order of setting (least specific to most), we need this because otherwise
+@@ -33,10 +33,10 @@ export class VFile {
+    *
+    * `options` is treated as:
+    *
+-   * *   `string` or `Uint8Array` — `{value: options}`
+-   * *   `URL` — `{path: options}`
+-   * *   `VFile` — shallow copies its data over to the new file
+-   * *   `object` — all fields are shallow copied over to the new file
++   * *   `string` or `Uint8Array` â€” `{value: options}`
++   * *   `URL` â€” `{path: options}`
++   * *   `VFile` â€” shallow copies its data over to the new file
++   * *   `object` â€” all fields are shallow copied over to the new file
+    *
+    * Path related fields are set in the following order (least specific to
+    * most specific): `history`, `path`, `basename`, `stem`, `extname`,
+@@ -71,14 +71,14 @@ export class VFile {
+      *
+      * @type {string}
+      */
+-    // Prevent calling `cwd` (which could be expensive) if it’s not needed;
++    // Prevent calling `cwd` (which could be expensive) if itâ€™s not needed;
+     // the empty string will be overridden in the next block.
+     this.cwd = 'cwd' in options ? '' : minproc.cwd()
+ 
+     /**
+      * Place to store custom info (default: `{}`).
+      *
+-     * It’s OK to store custom data directly on the file but moving it to
++     * Itâ€™s OK to store custom data directly on the file but moving it to
+      * `data` is recommended.
+      *
+      * @type {Data}
+@@ -108,7 +108,7 @@ export class VFile {
+      */
+     this.value
+ 
+-    // The below are non-standard, they are “well-known”.
++    // The below are non-standard, they are â€œwell-knownâ€.
+     // As in, used in several tools.
+     /**
+      * Source map.
+@@ -153,7 +153,7 @@ export class VFile {
+         options[field] !== undefined &&
+         options[field] !== null
+       ) {
+-        // @ts-expect-error: TS doesn’t understand basic reality.
++        // @ts-expect-error: TS doesnâ€™t understand basic reality.
+         this[field] = field === 'history' ? [...options[field]] : options[field]
+       }
+     }
+@@ -216,7 +216,7 @@ export class VFile {
+   /**
+    * Set the parent path (example: `'~'`).
+    *
+-   * Cannot be set if there’s no `path` yet.
++   * Cannot be set if thereâ€™s no `path` yet.
+    *
+    * @param {string | undefined} dirname
+    *   Dirname.
+@@ -245,7 +245,7 @@ export class VFile {
+    *
+    * Cannot contain path separators (`'/'` on unix, macOS, and browsers, `'\'`
+    * on windows).
+-   * Cannot be set if there’s no `path` yet.
++   * Cannot be set if thereâ€™s no `path` yet.
+    *
+    * @param {string | undefined} extname
+    *   Extname.
+@@ -341,7 +341,7 @@ export class VFile {
+    * and the `file` field is set to the current file path.
+    * The message is added to the `messages` field on `file`.
+    *
+-   * > 🪦 **Note**: also has obsolete signatures.
++   * > ðŸª¦ **Note**: also has obsolete signatures.
+    *
+    * @overload
+    * @param {string} reason
+@@ -410,7 +410,7 @@ export class VFile {
+    * likely not needed) and the `file` field is set to the current file path.
+    * The message is added to the `messages` field on `file`.
+    *
+-   * > 🪦 **Note**: also has obsolete signatures.
++   * > ðŸª¦ **Note**: also has obsolete signatures.
+    *
+    * @overload
+    * @param {string} reason
+@@ -477,7 +477,7 @@ export class VFile {
+    * needed) and the `file` field is set to the current file path.
+    * The message is added to the `messages` field on `file`.
+    *
+-   * > 🪦 **Note**: also has obsolete signatures.
++   * > ðŸª¦ **Note**: also has obsolete signatures.
+    *
+    * @overload
+    * @param {string} reason
+@@ -556,7 +556,7 @@ export class VFile {
+    * > <https://nodejs.org/api/util.html#whatwg-supported-encodings>.
+    *
+    * @param {string | null | undefined} [encoding='utf8']
+-   *   Character encoding to understand `value` as when it’s a `Uint8Array`
++   *   Character encoding to understand `value` as when itâ€™s a `Uint8Array`
+    *   (default: `'utf-8'`).
+    * @returns {string}
+    *   Serialized file.

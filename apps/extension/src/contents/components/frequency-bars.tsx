@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react"
 
-export type BarsMode = "mic" | "idle" | "flatline"
+import { player } from "../lib/audio-runtime"
+
+export type BarsMode = "voice" | "idle" | "flatline"
 
 const BAR_COUNT       = 14
 const MIN_BAR_HEIGHT  = 4
@@ -8,60 +10,50 @@ const MAX_BAR_HEIGHT  = 24
 const FLAT_BAR_HEIGHT = 5
 const FREQ_RANGE_HZ   = { low: 80, high: 3000 }
 
+// Bars visualize Compass's voice (the player's output analyser), not the
+// user's mic — the user already knows when they're talking; what they can't
+// tell is whether Compass is responding. Flat while Compass is silent.
 export function FrequencyBars({ mode }: { mode: BarsMode }) {
-  const barsRef   = useRef<(HTMLDivElement | null)[]>([])
-  const rafRef    = useRef<number>()
-  const streamRef = useRef<MediaStream>()
-  const ctxRef    = useRef<AudioContext>()
+  const barsRef = useRef<(HTMLDivElement | null)[]>([])
+  const rafRef  = useRef<number>()
 
   useEffect(() => {
     const stop = () => {
-      cancelAnimationFrame(rafRef.current!)
+      if (rafRef.current !== undefined) cancelAnimationFrame(rafRef.current)
       barsRef.current.forEach(b => { if (b) b.style.height = `${MIN_BAR_HEIGHT}px` })
-      streamRef.current?.getTracks().forEach(t => t.stop())
-      streamRef.current = undefined
-      ctxRef.current?.close().catch(() => {})
-      ctxRef.current = undefined
     }
 
-    const animate = (analyser: AnalyserNode) => {
-      const data = new Uint8Array(analyser.frequencyBinCount)
-      const smoothed = new Array(barsRef.current.length).fill(MIN_BAR_HEIGHT)
-      const nyquist = analyser.context.sampleRate / 2
-      const startBin = Math.floor((FREQ_RANGE_HZ.low  / nyquist) * analyser.frequencyBinCount)
-      const endBin   = Math.floor((FREQ_RANGE_HZ.high / nyquist) * analyser.frequencyBinCount)
-      const range = endBin - startBin
+    if (mode !== "voice") { stop(); return }
 
-      const tick = () => {
+    const smoothed = new Array<number>(BAR_COUNT).fill(MIN_BAR_HEIGHT)
+    let data: Uint8Array | null = null
+
+    const tick = () => {
+      // Re-fetched every frame: the player recreates its AudioContext (and
+      // analyser) across offline pauses, so a cached reference goes stale.
+      const analyser = player.getAnalyser()
+      if (analyser) {
+        if (!data || data.length !== analyser.frequencyBinCount) {
+          data = new Uint8Array(analyser.frequencyBinCount)
+        }
         analyser.getByteFrequencyData(data)
-        const step = Math.floor(range / smoothed.length)
+        const nyquist  = analyser.context.sampleRate / 2
+        const startBin = Math.floor((FREQ_RANGE_HZ.low  / nyquist) * analyser.frequencyBinCount)
+        const endBin   = Math.floor((FREQ_RANGE_HZ.high / nyquist) * analyser.frequencyBinCount)
+        const step     = Math.max(1, Math.floor((endBin - startBin) / BAR_COUNT))
         barsRef.current.forEach((bar, i) => {
           if (!bar) return
           let sum = 0
-          for (let j = 0; j < step; j++) sum += data[startBin + i * step + j]
-          const avg = sum / step
+          for (let j = 0; j < step; j++) sum += data![startBin + i * step + j] ?? 0
+          const avg    = sum / step
           const target = Math.max(MIN_BAR_HEIGHT, (avg / 255) * MAX_BAR_HEIGHT)
-          smoothed[i] = smoothed[i] * 0.5 + target * 0.5
+          smoothed[i]  = smoothed[i] * 0.5 + target * 0.5
           bar.style.height = `${smoothed[i]}px`
         })
-        rafRef.current = requestAnimationFrame(tick)
       }
-      tick()
+      rafRef.current = requestAnimationFrame(tick)
     }
-
-    if (mode === "idle" || mode === "flatline") { stop(); return }
-
-    // mic
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-      streamRef.current = stream
-      const ctx      = new AudioContext()
-      ctxRef.current = ctx
-      const source   = ctx.createMediaStreamSource(stream)
-      const analyser = ctx.createAnalyser()
-      analyser.fftSize = 1024
-      source.connect(analyser)
-      animate(analyser)
-    }).catch(console.error)
+    rafRef.current = requestAnimationFrame(tick)
 
     return stop
   }, [mode])

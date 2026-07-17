@@ -12,7 +12,7 @@ export interface Task {
 export interface SessionState {
     sessionId: string;
     send: (msg: ServerMessage) => void;
-    researchSlots: [Task | null, Task | null];
+    researchSlots: [Task | null];
     automationSlot: Task | null;
     cancelledTasks: Set<string>;
 }

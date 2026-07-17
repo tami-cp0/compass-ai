@@ -11,13 +11,23 @@
   border-radius: 24px;
   transform-origin: top right;
   overflow: hidden;
-  background: linear-gradient(
-    135deg,
-    hsla(161, 65%, 20%, 0.5) 0%,
-    hsla(161, 65%, 30%, 0.4) 40%,
-    hsla(161, 65%, 40%, 0.5) 60%,
-    hsla(161, 65%, 15%, 0.5) 100%
-  );
+  /* Frosted glass. Layered EXACTLY like the active pill (globals.css
+     .button::before dark base + .button::after green gradient): a dark base
+     under the pill's 135° green gradient at the pill's own alphas
+     (0.6/0.4/0.5/0.6), whose lighter 40–60% band is the diagonal glass
+     highlight. backdrop-filter blurs the page behind where the browser
+     honors it. */
+  background:
+    linear-gradient(
+      135deg,
+      hsla(161, 65%, 20%, 0.6) 0%,
+      hsla(161, 65%, 30%, 0.4) 40%,
+      hsla(161, 65%, 40%, 0.5) 60%,
+      hsla(161, 65%, 15%, 0.6) 100%
+    ),
+    linear-gradient(hsla(0, 0%, 8%, 0.28), hsla(0, 0%, 8%, 0.28));
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
   box-shadow:
     inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
     inset 0 -1px 0 hsla(161, 65%, 10%, 0.4),
@@ -68,9 +78,32 @@
   pointer-events: none;
 }
 
-.pin-panel.open .pin-panel__inner {
+.pin-panel.open .pin-panel__inner,
+.pin-panel.refreshing .pin-panel__inner {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* ─── Refresh light ───
+   The travelling glass sheen for in-place content refreshes: the same shine
+   language as the research chip, pane-sized. It translates -100% → 100% (via
+   WAAPI, driven from pin-panel.tsx) while the inner content's clip edge tracks
+   the band's centre — the new content develops exactly in the light's wake.
+   The pane's overflow:hidden + border-radius keep it inside the glass. */
+.pp-refresh-light {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(
+    115deg,
+    transparent 30%,
+    hsla(0, 0%, 100%, 0.22) 48%,
+    hsla(0, 0%, 100%, 0.30) 50%,
+    hsla(0, 0%, 100%, 0.22) 52%,
+    transparent 70%
+  );
+  transform: translateX(-100%);
 }
 
 .pin-panel__header {
@@ -122,6 +155,25 @@
   color: hsla(0, 0%, 100%, 0.95);
   font-size: 15px;
   line-height: 1.45;
+  /* Thin, translucent scrollbar that suits the glass (Firefox / standard). */
+  scrollbar-width: thin;
+  scrollbar-color: hsla(0, 0%, 100%, 0.25) transparent;
+}
+
+/* WebKit/Blink: slim, rounded, translucent — no track, appears only on hover. */
+.pin-panel__body::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.pin-panel__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.pin-panel__body::-webkit-scrollbar-thumb {
+  background: hsla(0, 0%, 100%, 0.18);
+  border-radius: 3px;
+}
+.pin-panel__body:hover::-webkit-scrollbar-thumb {
+  background: hsla(0, 0%, 100%, 0.32);
 }
 
 /* Markdown element styles — tight, professional. */
@@ -182,7 +234,7 @@
 .pin-panel__body .pp-blockquote {
   margin: 6px 0;
   padding: 6px 10px 6px 12px;
-  border-left: 3px solid hsla(50, 100%, 75%, 0.95);
+  border-left: 3px solid hsla(161, 60%, 65%, 0.95);
   background: hsla(0, 0%, 100%, 0.08);
   border-radius: 4px;
   color: hsla(0, 0%, 100%, 0.95);
@@ -234,18 +286,216 @@
 .pin-panel__body .pp-table th,
 .pin-panel__body .pp-table td {
   padding: 4px 8px;
-  text-align: left;
+  /* Centred both ways within the cell: horizontally in the column's width
+     (headers and data alike) and vertically in the row (cells otherwise
+     baseline-align, leaving single-line neighbours of a wrapped cell high). */
+  text-align: center;
+  vertical-align: middle;
   border-bottom: 1px solid hsla(0, 0%, 100%, 0.15);
 }
 
 .pin-panel__body .pp-table th {
   font-weight: 600;
   color: hsla(0, 0%, 100%, 0.85);
+  border-bottom: 1.5px solid hsla(0, 0%, 100%, 0.35);
+}
+
+/* Numbers scan better right-aligned with fixed-width digits. */
+.pin-panel__body .pp-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Numeric cells share the centred alignment; .pp-num remains as a hook (its
+   tabular-nums come from the shared td rule). */
+
+/* Faint zebra keeps wide rows traceable without adding visual weight. */
+.pin-panel__body .pp-table tbody tr:nth-child(even) td {
+  background: hsla(0, 0%, 100%, 0.04);
+}
+
+/* Gain/loss tinting for signed values (+3.2% / -1.8%). The sign itself
+   stays visible, so color is reinforcement — not the only signal. */
+.pin-panel__body .pp-up {
+  color: hsl(145, 75%, 72%);
+}
+
+.pin-panel__body .pp-down {
+  color: hsl(0, 85%, 78%);
 }
 
 .pin-panel__body .pp-a {
   color: hsla(161, 65%, 75%, 1);
   text-decoration: underline;
+}
+
+/* ─── Charts (```chart fences) ───
+   Text wears ink, never series color; the swatch/fill carries identity. */
+.pin-panel__body .pp-chart {
+  margin: 8px 0;
+}
+
+.pin-panel__body .pp-chart--pie {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.pin-panel__body .pp-chart--pie svg {
+  flex-shrink: 0;
+}
+
+.pin-panel__body .pp-chart__legend {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pin-panel__body .pp-chart__legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.pin-panel__body .pp-chart__swatch {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+
+.pin-panel__body .pp-chart__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: hsla(0, 0%, 100%, 0.9);
+}
+
+.pin-panel__body .pp-chart__value {
+  flex-shrink: 0;
+  color: hsla(0, 0%, 100%, 0.95);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Vertical bar chart: SVG owns axes/gridlines/bars; container just sizes it. */
+.pin-panel__body .pp-chart--bar {
+  width: 100%;
+}
+
+.pin-panel__body .pp-chart--bar svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* ─── Link louvers ───
+   Slim glass blades docked below the body: the same green-glass family as the
+   pane but LIGHTER, so they read as raised slats on the surface. A slow sheen
+   travels across each blade (the research-chip shine, stretched way out), and
+   the per-blade delay set inline (--louver-delay) makes them catch the light
+   in sequence. */
+.pp-louvers {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 14px 12px 14px;
+}
+
+.pp-louver {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 9px;
+  overflow: hidden;
+  text-decoration: none;
+  cursor: pointer;
+  /* Lighter than the pane: white-lifted green glass with the same lit rim. */
+  background: linear-gradient(
+    135deg,
+    hsla(161, 60%, 72%, 0.16) 0%,
+    hsla(161, 60%, 80%, 0.10) 45%,
+    hsla(161, 60%, 72%, 0.15) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 hsla(0, 0%, 100%, 0.22),
+    inset 0 -1px 0 hsla(161, 65%, 12%, 0.30);
+  transition: background 160ms ease, box-shadow 160ms ease;
+}
+
+.pp-louver:hover {
+  background: linear-gradient(
+    135deg,
+    hsla(161, 60%, 74%, 0.24) 0%,
+    hsla(161, 60%, 82%, 0.16) 45%,
+    hsla(161, 60%, 74%, 0.22) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 hsla(0, 0%, 100%, 0.32),
+    inset 0 -1px 0 hsla(161, 65%, 12%, 0.30);
+}
+
+/* The travelling light — chip-shine's language at a fraction of the speed. */
+.pp-louver::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    115deg,
+    transparent 35%,
+    hsla(0, 0%, 100%, 0.10) 47%,
+    hsla(0, 0%, 100%, 0.16) 50%,
+    hsla(0, 0%, 100%, 0.10) 53%,
+    transparent 65%
+  );
+  transform: translateX(-100%);
+  animation: louver-shine 9s ease-in-out var(--louver-delay, 0s) infinite;
+  pointer-events: none;
+}
+
+@keyframes louver-shine {
+  0%   { transform: translateX(-100%); }
+  38%  { transform: translateX(100%); }
+  100% { transform: translateX(100%); }
+}
+
+.pp-louver__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: hsla(0, 0%, 100%, 0.92);
+}
+
+.pp-louver__platform {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: hsla(161, 55%, 80%, 0.85);
+}
+
+.pp-louver__arrow {
+  flex-shrink: 0;
+  color: hsla(0, 0%, 100%, 0.55);
+  transition: color 160ms ease, transform 160ms ease;
+}
+
+.pp-louver:hover .pp-louver__arrow {
+  color: hsla(0, 0%, 100%, 0.95);
+  transform: translate(1px, -1px);
 }
 
 /* Icon sits 8px from top-right always. When the panel is 40x40, that lands

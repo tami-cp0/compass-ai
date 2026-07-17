@@ -11,3 +11,5 @@ allowBuilds:
   msgpackr-extract: true
   protobufjs: true
   sharp: true
+patchedDependencies:
+  vfile@6.0.3: patches/vfile@6.0.3.patch

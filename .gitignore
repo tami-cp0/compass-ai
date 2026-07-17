@@ -46,3 +46,5 @@ sitemap*
 
 # Throwaway test server
 ws-echo.js
+
+apps/api/logs/
