@@ -525,6 +525,18 @@ async function handlePageDataRequest(
     })
 
     const data = (results[0]?.result as string | undefined) ?? ""
+    // DIAGNOSTIC (read_page_data debug): shows the coordinate space so we can
+    // see where the box actually lands vs. the live viewport. dpr + viewport
+    // reveal whether the box was in normalized/physical/CSS space.
+    const [dbgDpr, dbgVw, dbgVh] = await readViewport(sessionTabId)
+    console.log("[compass][page-data-debug]", {
+      incomingBox: box,
+      physicalPixels,
+      dpr: dbgDpr,
+      viewportCss: { vw: dbgVw, vh: dbgVh },
+      cssBoxAfterScale: cssBox,
+      chars: data.length,
+    })
     sendRaw({ type: "page_data_response", requestId, data, truncated: false })
   } catch (err) {
     console.error("[compass] page data extraction failed:", err)
