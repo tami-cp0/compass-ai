@@ -156,18 +156,32 @@ export class TaskManager {
 
 	// A quick_search runs inline (not through a research slot): it's fast and
 	// cheap, and the live agent awaits the answer rather than being pinged later.
+	// One at a time — it can run alongside the (single) deep research. It drives
+	// the same pill chip as research so the user sees the lookup happening.
+	private quickSearchRunning = false;
+
 	async quickSearch(query: string): Promise<Record<string, unknown>> {
+		if (this.quickSearchRunning) {
+			return { status: 'rejected', reason: 'quick_search_already_running' };
+		}
+		this.quickSearchRunning = true;
 		const taskId = uuidv4();
+		const name = `quick: ${query.slice(0, 60)}`;
 		this.log.info('Quick search dispatched', { taskId, query: query.slice(0, 120) });
+		this._sendResearchStatus(taskId, name, 'started');
 		try {
 			const { answer, usage } = await runQuickSearch(query);
 			this.tokens.recordResearch(taskId, 'quick_search', usage, 'quick');
+			this._sendResearchStatus(taskId, name, 'completed');
 			this.log.info('Quick search completed', { taskId });
 			return { status: 'ok', answer };
 		} catch (err: unknown) {
 			const error = err instanceof Error ? err : new Error(String(err));
+			this._sendResearchStatus(taskId, name, 'failed');
 			this.log.error('Quick search failed', { taskId, error });
 			return { status: 'error', error: error.message };
+		} finally {
+			this.quickSearchRunning = false;
 		}
 	}
 
