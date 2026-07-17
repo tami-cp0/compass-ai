@@ -25,7 +25,23 @@ type PanelStage =
   | "expanding-height"
   | "open"
   | "collapsing-to-clear"
-  | "collapsing-to-swap"
+  // In-place content refresh: the pane stays open, eases to the new size, and
+  // a glass-light band sweeps across, developing the new content in its wake
+  // (ahead of the light the pane is blank glass). Replaces the old
+  // collapse-to-puck-and-reopen swap.
+  | "refreshing"
+
+// One clock drives the whole refresh: the pane's resize transition, the light
+// sweep, and the clip reveal all run on this duration/easing so they arrive
+// together.
+const REFRESH_MS = 700
+const REFRESH_EASE = "cubic-bezier(0.45, 0.05, 0.35, 1)"
+// Slanted clip edge (matches the 115° light gradient). x is the edge centre in
+// % of pane width; the light overlay translates -100%→100%, putting its band
+// centre on the same -50%→150% path.
+const REFRESH_SLANT = 18
+const refreshClipAt = (x: number) =>
+  `polygon(-60% -20%, ${x + REFRESH_SLANT}% -20%, ${x - REFRESH_SLANT}% 120%, -60% 120%)`
 
 interface PaneContent {
   title:    string
@@ -308,12 +324,17 @@ interface ChartSeries {
 }
 
 interface ChartSpec {
-  type:    "pie" | "bar"
+  type:    "pie" | "bar" | "line"
   data:    ChartDatum[]
   xLabel?: string
   yLabel?: string
   series?: ChartSeries[]
 }
+
+// Line charts keep point order (a sequence, not a ranking) and may carry
+// negative values (deltas, % change) — so they bypass the pie/bar filters
+// and never fold into "Other".
+const MAX_LINE_POINTS = 60
 
 const cleanAxisLabel = (v: unknown): string | undefined =>
   typeof v === "string" && v.trim() !== "" ? v.trim().slice(0, 40) : undefined
@@ -333,8 +354,24 @@ const datumTotal = (d: ChartDatum): number => {
 const parseChartSpec = (source: string): ChartSpec | null => {
   try {
     const parsed = JSON.parse(source) as ChartSpec
-    if (parsed.type !== "pie" && parsed.type !== "bar") return null
+    if (parsed.type !== "pie" && parsed.type !== "bar" && parsed.type !== "line") return null
     if (!Array.isArray(parsed.data) || parsed.data.length === 0) return null
+
+    if (parsed.type === "line") {
+      const data = parsed.data
+        .filter(
+          (d) => typeof d.label === "string" && typeof d.value === "number" && isFinite(d.value)
+        )
+        .map((d): ChartDatum => ({ label: d.label, value: d.value, display: d.display }))
+        .slice(0, MAX_LINE_POINTS)
+      if (data.length < 2) return null
+      return {
+        type:   "line",
+        data,
+        xLabel: cleanAxisLabel(parsed.xLabel),
+        yLabel: cleanAxisLabel(parsed.yLabel),
+      }
+    }
 
     // Validate declared series (stacked bars only).
     const series =
@@ -679,11 +716,165 @@ const BarChart = ({
   )
 }
 
+// A "nice" tick step (1/2/2.5/5 × 10^k) at or above the raw step, so line-chart
+// gridlines land on round numbers whatever the data range.
+const niceStep = (raw: number): number => {
+  if (raw <= 0) return 1
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)))
+  const n = raw / pow
+  const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10
+  return step * pow
+}
+
+// Time-series / sequence line chart — the zig-zag. Points are connected in the
+// order given; the Y domain zooms to the data (with padding) so a tight price
+// band still shows its shape, snapping to 0 only when the data already sits
+// near it. Negative values are fine (the zero line renders when crossed).
+const LINE_VIEW_W = 300
+
+const LineChart = ({
+  data,
+  xLabel,
+  yLabel,
+}: {
+  data:    ChartDatum[]
+  xLabel?: string
+  yLabel?: string
+}) => {
+  const values = data.map((d) => d.value)
+  const lo = Math.min(...values)
+  const hi = Math.max(...values)
+  const span = hi - lo || Math.abs(hi) || 1
+  const pad = span * 0.12
+  // Data hugging zero from above keeps the 0 baseline; otherwise zoom in.
+  let domLo = lo >= 0 && lo - pad < span * 0.3 && lo < span ? 0 : lo - pad
+  const step = niceStep((hi + pad - domLo) / 4)
+  domLo = Math.floor(domLo / step) * step
+  const ticks: number[] = []
+  for (let t = domLo; t < hi + pad + step * 0.5; t += step) ticks.push(t)
+  const domHi = ticks[ticks.length - 1]
+
+  const viewH = xLabel ? 184 : 170
+  const m = {
+    top:    10,
+    right:  8,
+    bottom: 26 + (xLabel ? 14 : 0),
+    left:   34 + (yLabel ? 12 : 0),
+  }
+  const plotW = LINE_VIEW_W - m.left - m.right
+  const plotH = viewH - m.top - m.bottom
+  const xFor = (i: number) => m.left + (data.length === 1 ? plotW / 2 : (plotW * i) / (data.length - 1))
+  const yFor = (v: number) => m.top + plotH * (1 - (v - domLo) / (domHi - domLo || 1))
+
+  const pts = data.map((d, i) => `${xFor(i).toFixed(1)},${yFor(d.value).toFixed(1)}`)
+  const areaPath =
+    `M ${xFor(0).toFixed(1)} ${(m.top + plotH).toFixed(1)} L ` +
+    pts.map((p) => p.replace(",", " ")).join(" L ") +
+    ` L ${xFor(data.length - 1).toFixed(1)} ${(m.top + plotH).toFixed(1)} Z`
+
+  // Sparse X tick labels — at most ~6, always including first and last.
+  const every = Math.max(1, Math.ceil(data.length / 6))
+  const showLabel = (i: number) => i === 0 || i === data.length - 1 || i % every === 0
+
+  const [h, s, l] = SERIES_HUES[0] // teal — the pane's lead hue
+  const stroke = `hsla(${h}, ${s}%, ${Math.min(92, l + 16)}%, 0.92)`
+  const AREA_ID = "pp-line-area"
+
+  return (
+    <div className="pp-chart pp-chart--line">
+      <svg viewBox={`0 0 ${LINE_VIEW_W} ${viewH}`} width="100%" role="img" aria-label="Line chart">
+        <defs>
+          <linearGradient id={AREA_ID} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={`hsla(${h}, ${s}%, ${l}%, 0.30)`} />
+            <stop offset="100%" stopColor={`hsla(${h}, ${s}%, ${l}%, 0.02)`} />
+          </linearGradient>
+        </defs>
+        {/* Y gridlines + tick labels */}
+        {ticks.map((t, i) => {
+          const y = yFor(t)
+          const isZero = t === 0 && domLo < 0
+          return (
+            <g key={i}>
+              <line
+                x1={m.left} y1={y} x2={LINE_VIEW_W - m.right} y2={y}
+                stroke={isZero ? "hsla(0,0%,100%,0.28)" : "hsla(0,0%,100%,0.12)"}
+                strokeWidth={isZero ? 1 : 0.75}
+              />
+              <text
+                x={m.left - 5} y={y} textAnchor="end" dominantBaseline="middle"
+                fontSize={8} fill="hsla(0,0%,100%,0.7)" style={{ fontVariantNumeric: "tabular-nums" }}
+              >
+                {fmtTick(t)}
+              </text>
+            </g>
+          )
+        })}
+        {/* Baseline */}
+        <line
+          x1={m.left} y1={m.top + plotH} x2={LINE_VIEW_W - m.right} y2={m.top + plotH}
+          stroke="hsla(0,0%,100%,0.28)" strokeWidth={1}
+        />
+        {/* Area fill under the line, then the line itself */}
+        <path d={areaPath} fill={`url(#${AREA_ID})`} pointerEvents="none" />
+        <polyline
+          points={pts.join(" ")}
+          fill="none" stroke={stroke} strokeWidth={1.75}
+          strokeLinejoin="round" strokeLinecap="round"
+        />
+        {/* Point dots with hover values; skipped when dense to keep the line clean */}
+        {data.length <= 24 &&
+          data.map((d, i) => (
+            <circle
+              key={i}
+              cx={xFor(i)} cy={yFor(d.value)} r={2.4}
+              fill={glassFill(h, s, l)} stroke={GLASS_EDGE} strokeWidth={GLASS_EDGE_W}
+            >
+              <title>{`${d.label}: ${fmtValue(d)}`}</title>
+            </circle>
+          ))}
+        {/* X tick labels */}
+        {data.map((d, i) =>
+          showLabel(i) ? (
+            <text
+              key={i}
+              x={xFor(i)} y={m.top + plotH + 9} textAnchor="middle" dominantBaseline="hanging"
+              fontSize={8} fill="hsla(0,0%,100%,0.82)"
+            >
+              {truncLabel(d.label, 7)}
+              <title>{`${d.label}: ${fmtValue(d)}`}</title>
+            </text>
+          ) : null
+        )}
+        {/* Axis titles */}
+        {yLabel && (
+          <text
+            transform={`translate(9 ${m.top + plotH / 2}) rotate(-90)`}
+            textAnchor="middle" fontSize={8.5} fill="hsla(0,0%,100%,0.6)"
+          >
+            {yLabel}
+          </text>
+        )}
+        {xLabel && (
+          <text
+            x={m.left + plotW / 2} y={viewH - 3} textAnchor="middle"
+            fontSize={8.5} fill="hsla(0,0%,100%,0.6)"
+          >
+            {xLabel}
+          </text>
+        )}
+      </svg>
+    </div>
+  )
+}
+
 const ChartBlock = ({ source }: { source: string }) => {
   const spec = parseChartSpec(source)
   if (!spec) {
     // Malformed spec: fall back to showing the raw block rather than blanking.
     return <pre className="pp-pre" style={{ whiteSpace: "pre-wrap" }}>{source}</pre>
+  }
+  if (spec.type === "line") {
+    return <LineChart data={spec.data} xLabel={spec.xLabel} yLabel={spec.yLabel} />
   }
   const data = foldToSlots(spec.data)
   return spec.type === "pie"
@@ -779,8 +970,9 @@ const PinPanel = () => {
   const [stage, setStage]     = useState<PanelStage>("collapsed")
   const [measuredHeight, setMeasuredHeight] = useState<number | null>(null)
   const [measuredWidth,  setMeasuredWidth]  = useState<number | null>(null)
-  const pendingContentRef = useRef<PaneContent | null>(null)
   const measureBodyRef    = useRef<HTMLDivElement | null>(null)
+  const revealRef         = useRef<HTMLDivElement | null>(null)
+  const lightRef          = useRef<HTMLDivElement | null>(null)
   // Mirrors `stage` so the message-handler effect (deps: [content]) can read the
   // current stage without a stale closure.
   const stageRef          = useRef<PanelStage>(stage)
@@ -829,30 +1021,28 @@ const PinPanel = () => {
           links:    msg.links ?? [],
         }
         const cur = stageRef.current
-        const collapsed =
-          cur === "collapsed" || cur === "collapsing-to-clear" || cur === "collapsing-to-swap"
+        const collapsed = cur === "collapsed" || cur === "collapsing-to-clear"
         if (content === null || collapsed) {
           // No pane yet, OR the pane is already at puck size (minimized /
-          // mid-collapse). There's no open pane to shrink first, so the
-          // collapse-then-swap animation would stall and the new content would
-          // sit in pendingContentRef forever (the model gets "rendered" but the
-          // screen keeps the old pane). Swap content in and expand directly.
-          pendingContentRef.current = null
+          // mid-collapse). Nothing visible to refresh in place — swap content
+          // in and run the normal expand.
           setContent(next)
           setStage("collapsed")
           requestAnimationFrame(() => setStage("expanding-width"))
         } else {
-          pendingContentRef.current = next
-          setStage("collapsing-to-swap")
+          // Pane is open — refresh in place: content swaps now, the pane eases
+          // to its new size, and the light sweep develops the new content.
+          // (Re-entrant while already refreshing: content change restarts the
+          // sweep effect.)
+          setContent(next)
+          setStage("refreshing")
         }
         return false
       }
       if (msg.type === "pin_pane_clear") {
         if (content !== null) {
-          pendingContentRef.current = null
           const cur = stageRef.current
-          const collapsed =
-            cur === "collapsed" || cur === "collapsing-to-clear" || cur === "collapsing-to-swap"
+          const collapsed = cur === "collapsed" || cur === "collapsing-to-clear"
           // A minimized/collapsed pane is already at puck size, so shrinking it
           // fires no width transition — handleTransitionEnd would never clear
           // content and the puck would linger. Drop it immediately in that case;
@@ -879,20 +1069,35 @@ const PinPanel = () => {
     return () => chrome.runtime.onMessage.removeListener(onMessage)
   }, [content])
 
-  // Swap handoff via a fixed timer (matching the CSS transition), not
-  // transitionEnd: the shrink fires both width AND height events, and the
-  // trailing one can be misread as the next stage's completion.
+  // Refresh sweep. Web Animations API (not stylesheet keyframes) so Plasmo's
+  // CSS pipeline can't strip it: the inner content is clipped behind a slanted
+  // edge that tracks the light band's centre — both run the same duration and
+  // easing, so the content develops exactly where the light has passed.
+  // Re-runs when content changes mid-refresh (a rapid second set restarts the
+  // sweep with the newest content).
   useEffect(() => {
-    if (stage !== "collapsing-to-swap") return
-    const id = setTimeout(() => {
-      const pending = pendingContentRef.current
-      if (!pending) return
-      pendingContentRef.current = null
-      setContent(pending)
-      requestAnimationFrame(() => setStage("expanding-width"))
-    }, 380)
-    return () => clearTimeout(id)
-  }, [stage])
+    if (stage !== "refreshing") return
+    const reveal = revealRef.current
+    const light  = lightRef.current
+    if (!reveal || !light) return
+
+    const clipAnim = reveal.animate(
+      [{ clipPath: refreshClipAt(-50) }, { clipPath: refreshClipAt(150) }],
+      { duration: REFRESH_MS, easing: REFRESH_EASE, fill: "forwards" }
+    )
+    const lightAnim = light.animate(
+      [{ transform: "translateX(-100%)" }, { transform: "translateX(100%)" }],
+      { duration: REFRESH_MS, easing: REFRESH_EASE, fill: "forwards" }
+    )
+
+    const done = () => setStage("open")
+    clipAnim.addEventListener("finish", done)
+    return () => {
+      clipAnim.removeEventListener("finish", done)
+      clipAnim.cancel() // drops the fill-forwards clip so the full content shows
+      lightAnim.cancel()
+    }
+  }, [stage, content])
 
   if (content === null) return null
 
@@ -919,7 +1124,7 @@ const PinPanel = () => {
   }
 
   const isCollapsedVisual =
-    stage === "collapsed" || stage === "collapsing-to-clear" || stage === "collapsing-to-swap"
+    stage === "collapsed" || stage === "collapsing-to-clear"
 
   const stageClass =
     isCollapsedVisual
@@ -928,7 +1133,9 @@ const PinPanel = () => {
         ? "expanding-width"
         : stage === "expanding-height"
           ? "expanding-height"
-          : "open"
+          : stage === "refreshing"
+            ? "refreshing"
+            : "open"
 
   const inlineStyle: React.CSSProperties = {
     zIndex: 2147483646,
@@ -939,6 +1146,11 @@ const PinPanel = () => {
     // bypasses that pipeline so the frosted-glass blur actually renders.
     backdropFilter: "blur(5px) saturate(1.25)",
     WebkitBackdropFilter: "blur(5px) saturate(1.25)",
+    // During a refresh the resize shares the sweep's clock, so the pane's
+    // edges and the light arrive together — one motion.
+    ...(stage === "refreshing"
+      ? { transition: `width ${REFRESH_MS}ms ${REFRESH_EASE}, height ${REFRESH_MS}ms ${REFRESH_EASE}` }
+      : {}),
   }
 
   // Multi-column flow (model opts in via columns:2) roughly halves tall content
@@ -983,25 +1195,66 @@ const PinPanel = () => {
             <UnfoldHorizontal size={18} style={{ transform: "rotate(-45deg)" }} />
           </div>
         ) : (
-          <div className="pin-panel__inner">
-            <div className="pin-panel__header">
-              <span className="pin-panel__title">{content.title}</span>
-              <button
-                type="button"
-                className="pin-panel__collapse-btn"
-                onClick={handleCollapseClick}
-                aria-label="Collapse pin panel"
-              >
-                <FoldHorizontal size={16} style={{ transform: "rotate(-45deg)" }} />
-              </button>
+          <>
+            {/* Reveal wrapper: pane-sized (inset:0) so its clip percentages live
+                in the SAME coordinate space as the light overlay — the develop
+                edge and the band stay locked even while the pane resizes. The
+                initial inline clip hides everything the instant a refresh
+                renders (the sweep effect runs after paint; without it the new
+                content would flash unclipped for a frame). */}
+            <div
+              ref={revealRef}
+              style={{
+                position: "absolute",
+                inset: 0,
+                ...(stage === "refreshing"
+                  ? { clipPath: refreshClipAt(-50), willChange: "clip-path" }
+                  : {}),
+              }}
+            >
+            <div
+              className="pin-panel__inner"
+              // During a refresh the content is laid out at its FINAL size
+              // immediately, anchored top-right like the pane itself — so the
+              // pane's edges ease over already-settled content instead of
+              // re-wrapping text and flashing scrollbars every frame while the
+              // box animates (the "grow glitch").
+              style={
+                stage === "refreshing"
+                  ? {
+                      left:   "auto",
+                      right:  0,
+                      top:    0,
+                      bottom: "auto",
+                      width:  measuredWidth ?? content.width,
+                      height: measuredHeight ?? content.height,
+                    }
+                  : undefined
+              }
+            >
+              <div className="pin-panel__header">
+                <span className="pin-panel__title">{content.title}</span>
+                <button
+                  type="button"
+                  className="pin-panel__collapse-btn"
+                  onClick={handleCollapseClick}
+                  aria-label="Collapse pin panel"
+                >
+                  <FoldHorizontal size={16} style={{ transform: "rotate(-45deg)" }} />
+                </button>
+              </div>
+              <div className="pin-panel__body" style={{ ...columnStyle, overflowY: "auto", overflowX: "hidden" }}>
+                <MarkdownErrorBoundary markdown={content.markdown}>
+                  <MarkdownBody markdown={content.markdown} />
+                </MarkdownErrorBoundary>
+              </div>
+              {content.links.length > 0 && <LinkLouvers links={content.links} />}
             </div>
-            <div className="pin-panel__body" style={{ ...columnStyle, overflowY: "auto", overflowX: "hidden" }}>
-              <MarkdownErrorBoundary markdown={content.markdown}>
-                <MarkdownBody markdown={content.markdown} />
-              </MarkdownErrorBoundary>
             </div>
-            {content.links.length > 0 && <LinkLouvers links={content.links} />}
-          </div>
+            {/* Refresh light — the travelling glass sheen whose wake reveals the
+                new content. The pane's overflow:hidden keeps it inside the glass. */}
+            {stage === "refreshing" && <div ref={lightRef} className="pp-refresh-light" />}
+          </>
         )}
       </div>
     </div>

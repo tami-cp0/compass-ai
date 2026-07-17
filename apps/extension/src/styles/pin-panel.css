@@ -78,9 +78,32 @@
   pointer-events: none;
 }
 
-.pin-panel.open .pin-panel__inner {
+.pin-panel.open .pin-panel__inner,
+.pin-panel.refreshing .pin-panel__inner {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* ─── Refresh light ───
+   The travelling glass sheen for in-place content refreshes: the same shine
+   language as the research chip, pane-sized. It translates -100% → 100% (via
+   WAAPI, driven from pin-panel.tsx) while the inner content's clip edge tracks
+   the band's centre — the new content develops exactly in the light's wake.
+   The pane's overflow:hidden + border-radius keep it inside the glass. */
+.pp-refresh-light {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(
+    115deg,
+    transparent 30%,
+    hsla(0, 0%, 100%, 0.22) 48%,
+    hsla(0, 0%, 100%, 0.30) 50%,
+    hsla(0, 0%, 100%, 0.22) 52%,
+    transparent 70%
+  );
+  transform: translateX(-100%);
 }
 
 .pin-panel__header {
@@ -263,7 +286,11 @@
 .pin-panel__body .pp-table th,
 .pin-panel__body .pp-table td {
   padding: 4px 8px;
-  text-align: left;
+  /* Centred both ways within the cell: horizontally in the column's width
+     (headers and data alike) and vertically in the row (cells otherwise
+     baseline-align, leaving single-line neighbours of a wrapped cell high). */
+  text-align: center;
+  vertical-align: middle;
   border-bottom: 1px solid hsla(0, 0%, 100%, 0.15);
 }
 
@@ -278,9 +305,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-.pin-panel__body .pp-table .pp-num {
-  text-align: right;
-}
+/* Numeric cells share the centred alignment; .pp-num remains as a hook (its
+   tabular-nums come from the shared td rule). */
 
 /* Faint zebra keeps wide rows traceable without adding visual weight. */
 .pin-panel__body .pp-table tbody tr:nth-child(even) td {
