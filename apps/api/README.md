@@ -11,7 +11,7 @@ The Node.js back end for Compass AI. A single uWebSockets.js process that hosts 
 This service is consumed by exactly one client: the [Compass AI browser extension](../extension/). The extension opens a single WebSocket per user session and streams 16 kHz PCM mic audio over it; the API streams Gemini's PCM audio replies back. In between, the API:
 
 - Holds a persistent **Gemini Live** session per WS connection (the "front desk")
-- Runs background **research** (OpenAI file-search over a vector store) and **web automation** (BAML + GPT-4o driving DOM actions in the extension) jobs (the "back office")
+- Runs background **research** (OpenAI Responses API with `web_search`) and **web automation** (Anthropic Claude driving DOM actions in the extension) jobs (the "back office")
 - Persists session state, in-flight tasks, and token usage in **Redis**
 - Streams tool-call results back into the live session as content parts so Gemini can speak the answer naturally
 
@@ -27,11 +27,11 @@ src/
 │   ├── index.ts            # Entrypoint: connect Redis, start server
 │   ├── server.ts           # uWebSockets.js app, WS upgrade + origin allowlist
 │   ├── session-store.ts    # Redis-backed session lookup
-│   └── task-manager.ts     # Concurrency limits (research x2, automation x1)
+│   └── task-manager.ts     # Concurrency limits (research x1, automation x1)
 ├── agents/
 │   ├── conversation/       # Gemini Live session + live-config (tools, system prompt)
-│   ├── research/           # OpenAI Responses API with file_search + web_search
-│   └── web/                # Web automation agent (BAML + GPT-4o + DOM tools)
+│   ├── research/           # OpenAI Responses API with web_search
+│   └── web/                # Web automation agent (Anthropic Claude + DOM tools)
 ├── infra/
 │   ├── logger.ts           # pino with redaction, session-scoped child loggers
 │   ├── redis.ts            # ioredis client + connectRedis()
@@ -41,7 +41,7 @@ src/
 
 ### Key patterns
 
-- **Concurrency limits.** `TaskManager` enforces ≤2 concurrent research jobs and ≤1 automation per session. New requests beyond the limit are rejected with a structured error that Gemini relays to the user.
+- **Concurrency limits.** `TaskManager` enforces ≤1 deep research job and ≤1 automation per session; a fast inline `quick_search` may run alongside the deep research. New requests beyond the limit are rejected with a structured error that Gemini relays to the user.
 - **Origin allowlist.** In production, `ALLOWED_ORIGINS` is enforced on the WS upgrade; in development it is ignored so unpacked extensions on any chrome-extension://... id can connect.
 - **Stateless across restarts.** Session metadata lives in Redis; live Gemini sessions do not survive a restart by design (the extension re-handshakes).
 
