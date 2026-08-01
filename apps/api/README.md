@@ -24,19 +24,23 @@ This service is consumed by exactly one client: the [Compass AI browser extensio
 ```
 src/
 ├── core/
-│   ├── index.ts            # Entrypoint: connect Redis, start server
-│   ├── server.ts           # uWebSockets.js app, WS upgrade + origin allowlist
+│   ├── index.ts            # Entrypoint: connect Redis, start server, graceful shutdown
+│   ├── server.ts           # uWebSockets.js app, WS upgrade + origin allowlist, pin-pane handlers
 │   ├── session-store.ts    # Redis-backed session lookup
-│   └── task-manager.ts     # Concurrency limits (research x1, automation x1)
+│   ├── task-manager.ts     # Concurrency limits (research x1, automation x1) + task routing
+│   └── pane-estimate.ts    # Pin-pane sizing/fence helpers
 ├── agents/
 │   ├── conversation/       # Gemini Live session + live-config (tools, system prompt)
-│   ├── research/           # OpenAI Responses API with web_search
-│   └── web/                # Web automation agent (Anthropic Claude + DOM tools)
-├── infra/
-│   ├── logger.ts           # pino with redaction, session-scoped child loggers
-│   ├── redis.ts            # ioredis client + connectRedis()
-│   └── token-tracker.ts    # Per-session token accounting
-└── assets/                 # Static prompts / fixtures
+│   ├── research/           # OpenAI Responses API with web_search (deep + quick_search)
+│   └── web/                # Web automation agent (Anthropic Claude + DOM tools, memory, steps)
+├── data/
+│   ├── ngx-equities.ts     # NGX equities lookup
+│   └── ngx-equities-data.ts# Bundled NGX equities dataset
+└── infra/
+    ├── logger.ts           # pino with redaction, session-scoped child loggers
+    ├── redis.ts            # ioredis client + connectRedis()
+    ├── token-tracker.ts    # Per-session token accounting
+    └── datetime.ts         # Date/time helpers
 ```
 
 ### Key patterns

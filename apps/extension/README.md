@@ -11,8 +11,9 @@ The Chrome MV3 browser extension that is the user-facing half of Compass AI. Ren
 This is the only client of [`@compass-ai/api`](../api/). It is scoped exclusively to the host defined by `PLASMO_PUBLIC_HOST_MATCH` and does three things:
 
 1. **Voice I/O.** Captures 16 kHz PCM mic audio in an AudioWorklet and streams it over WebSocket; receives PCM from the API and plays it through the Web Audio API.
-2. **DOM access.** Watches the page for tagged elements and replies to `dom_snapshot_request` from the API with a screenshot + element map so the web agent can reason about the live UI.
-3. **Action execution.** Performs `click`, `type`, `scroll`, and `highlight` intents on behalf of the agent and reports back success/failure.
+2. **Vision + page data.** Streams `vision_frame`s for the live session, and replies to `agent_observation_request` / `screenshot_request` / `page_data_request` with a screenshot (plus geometry) and extracted text so the agents can reason about the live UI.
+3. **Action execution.** Performs `agent_action`s (`click`, `type`, `scroll`, `highlight`, ...) on behalf of the web agent and reports back via `agent_action_result`.
+4. **Pinned pane.** Renders a markdown pane next to the pill in response to `pin_pane_set` / `pin_pane_clear` / `pin_pane_minimize`.
 
 ---
 
@@ -30,20 +31,22 @@ src/
 │   └── pcm-player.ts         # Web Audio queue + scheduling for inbound PCM
 ├── contents/                 # Plasmo content scripts (run on the matched host)
 │   ├── pill.tsx              # Floating React pill UI (mic, state, bars, edge glow)
-│   ├── dom-watcher.ts        # Element tagging, screenshot, action executor
-│   ├── components/           # Pill subcomponents
-│   ├── hooks/                # React hooks (session state, audio level, etc.)
-│   └── lib/                  # Local utilities
+│   ├── pin-panel.tsx         # Pinned markdown pane rendered next to the pill
+│   ├── components/           # Pill subcomponents (icon, frequency bars, chips, ...)
+│   ├── hooks/                # React hooks (use-session, ...)
+│   └── lib/                  # Local utilities (audio-runtime, edge-glow, pill-view)
+├── vendor/
+│   └── react-markdown.js     # Bundled react-markdown (see vendor:markdown script)
 └── styles/
-    └── globals.css           # Tailwind entry
+    ├── globals.css           # Tailwind entry
+    └── pin-panel.css         # Pin-pane styles
 ```
 
 ### Key patterns
 
 - **Service worker owns the socket.** Content scripts never talk to the API directly. The background SW holds the single WS, so reconnects and lifecycle are centralized.
-- **Wire types are shared.** All messages over the WS use the union types in [`@compass-ai/types`](../../packages/types/) (`ExtensionMessage`, `ServerMessage`). Adding a new message means editing that package first.
-- **Audio is never base64'd between content and SW.** Frames go through `chrome.runtime` as transferable-friendly payloads to minimize copies.
-- **Critical actions require user confirmation.** When the API sends `user_action_required`, the pill prompts the user and replies with `user_action_result`.
+- **Wire types are shared.** All messages over the WS use the union types in [`@compass-ai/types`](../../packages/types/) (`ExtensionMessage` for extension → API, `ServerMessage` for API → extension). Adding a new message means editing that package first.
+- **Audio flows through the service worker.** Frames go through `chrome.runtime` between the content script and the SW so the single WS stays centralized.
 
 ---
 
