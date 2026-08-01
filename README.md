@@ -2,6 +2,8 @@
 
 A voice copilot for [Atlass Portfolios](https://app.atlassportfolios.com). The user speaks to an AI assistant that can automate the page on their behalf and research stocks in real time, without the assistant ever going silent.
 
+> **License:** MIT. Contributions are accepted under the same license — see [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ---
 
 ## Repository Architecture
@@ -64,14 +66,9 @@ pnpm --filter @compass-ai/types build
 
 ---
 
-## Contribution Guidelines
+## Contributing
 
-- **TypeScript** everywhere; `strict` is on. `pnpm typecheck` must pass.
-- **No new READMEs or doc files** without a real reason — keep documentation close to the code it describes.
-- **Env vars** are validated at startup; if you add one, update the relevant `.env.example` with a comment explaining what it is.
-- **Wire protocol changes** go through `packages/types` first so both ends stay in sync; rebuild `@compass-ai/types` before relying on the new shape.
-- **Commits** follow conventional-commit style (`feat:`, `fix:`, `chore:`, `refactor:`, etc), scoped where useful (`feat(extension):`).
-- **Logging** uses the structured pino logger in the API ([apps/api/README.md](apps/api/README.md#logging) has the full overview). Never `console.log` server-side.
+Setup, dev workflow, coding conventions, and the wire-protocol change process live in [CONTRIBUTING.md](CONTRIBUTING.md). In short: TypeScript everywhere with `strict` on, `pnpm typecheck` must pass, wire-protocol changes go through `packages/types` first, and commits follow conventional-commit style.
 
 ---
 
@@ -88,3 +85,13 @@ compass-ai/
 ├── pnpm-workspace.yaml         # Workspace globs + allowBuilds
 └── turbo.json                  # Task pipeline
 ```
+
+---
+
+## License
+
+Compass AI is licensed under the **MIT License**. See [LICENSE](LICENSE) for the full text.
+
+MIT is a permissive license: you may use, copy, modify, and distribute the software — including in closed-source and commercial products — provided you keep the copyright notice and license text. The software is provided "as is", without warranty.
+
+**Disclaimer:** Compass AI is an independent, unaffiliated project. It is **not** affiliated with, associated with, authorized by, endorsed by, or in any way officially connected to Atlass Portfolios or its owners. "Atlass Portfolios" and any related names or marks are the property of their respective owners and are used here only to describe the third-party website this tool interoperates with.

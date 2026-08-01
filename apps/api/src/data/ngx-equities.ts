@@ -31,6 +31,11 @@ const INDEX = NGX_EQUITIES.map((e) => ({
 	tickerLc: e.ticker.toLowerCase(),
 	companyLc: e.company.toLowerCase(),
 	companyTokens: tokenize(e.company),
+	// Former identity (e.g. WAPCO / Lafarge Africa) so an old ticker or name
+	// still resolves to the current listing. Empty for equities that never
+	// rebranded.
+	formerNorm: e.formerName ? normalize(e.formerName) : '',
+	formerTokens: e.formerName ? tokenize(e.formerName) : [],
 }));
 
 // Classic Levenshtein distance, capped to keep hot-path bounded.
@@ -122,6 +127,12 @@ export function lookupTicker(query: string, limit = 5): LookupResult {
 	const exact = INDEX.find((e) => e.tickerLc === normQ);
 	if (exact) return { matches: [exact.equity], confidence: 'exact' };
 
+	// A former ticker/name that normalizes exactly (e.g. "WAPCO" → HBMNG) is
+	// still treated as an exact hit — the user named the company unambiguously,
+	// just by its old identity.
+	const formerExact = INDEX.find((e) => e.formerNorm && e.formerNorm.includes(normQ) && normQ.length >= 4);
+	if (formerExact) return { matches: [formerExact.equity], confidence: 'exact' };
+
 	const qTokens = tokenize(query);
 	const scored: Array<{ equity: NgxEquity; score: number }> = [];
 
@@ -137,14 +148,17 @@ export function lookupTicker(query: string, limit = 5): LookupResult {
 
 		// Company similarity: substring hit, else fuzzy per-token overlap.
 		// Fuzzy lets MITN match the 'mtn' token in "MTN Nigeria Communications".
+		// The former name is folded into the same token pool so an old name
+		// ("Lafarge Africa") fuzzy-matches the current listing.
+		const nameTokens = e.formerTokens.length > 0 ? [...e.companyTokens, ...e.formerTokens] : e.companyTokens;
 		let companySim = 0;
-		if (e.companyLc.includes(normQ)) {
+		if (e.companyLc.includes(normQ) || (e.formerNorm && e.formerNorm.includes(normQ))) {
 			companySim = 0.9;
-		} else if (qTokens.length > 0 && e.companyTokens.length > 0) {
+		} else if (qTokens.length > 0 && nameTokens.length > 0) {
 			let total = 0;
 			for (const q of qTokens) {
 				let best = 0;
-				for (const c of e.companyTokens) {
+				for (const c of nameTokens) {
 					const s = similarity(q, c);
 					if (s > best) best = s;
 				}

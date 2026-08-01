@@ -29,10 +29,9 @@ src/
 
 ### Highlights
 
-- **`ExtensionMessage`** — discriminated union of every message the extension sends to the API (`audio_chunk`, `dom_snapshot`, `action_result`, ...).
-- **`ServerMessage`** — discriminated union of every message the API sends to the extension (`audio_chunk`, `action`, `dom_snapshot_request`, `user_action_required`, ...).
-- **`WebIntent` / `WebAction`** — the action contract the web agent uses to drive the DOM (`click`, `type`, `scroll`, `highlight`).
-- **`DomTaskType`** — `"click" | "form" | "read" | "structure"`. Drives how the extension prepares a DOM snapshot for the agent.
+- **`ExtensionMessage`** — discriminated union of every message the extension sends to the API (`audio_chunk`, `agent_observation`, `agent_action_result`, `vision_frame`, `screenshot_response`, `page_data_response`, ...).
+- **`ServerMessage`** — discriminated union of every message the API sends to the extension (`audio_chunk`, `agent_action`, `agent_observation_request`, `screenshot_request`, `page_data_request`, `pin_pane_set`, ...).
+- **`AgentAction`** — the action contract the web agent uses to drive the DOM (`click`, `type`, `scroll`, `highlight`, ...).
 
 The wire types use TypeScript's discriminated unions on the `type` field, so consumers should `switch (msg.type)` and let the compiler enforce exhaustiveness.
 

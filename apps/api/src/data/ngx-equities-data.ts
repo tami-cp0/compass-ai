@@ -13,6 +13,9 @@ export interface NgxEquity {
 	company: string;
 	sector: string;
 	subSector?: string;
+	// Prior corporate identity, kept so users who still say the old name or
+	// ticker resolve. Searched by lookupTicker alongside company/ticker.
+	formerName?: string;
 }
 
 export const NGX_EQUITIES: readonly NgxEquity[] = [
@@ -102,7 +105,7 @@ export const NGX_EQUITIES: readonly NgxEquity[] = [
 	{ ticker: 'PORTPAINT', company: 'Portland Paints & Products Nigeria Plc', sector: 'Industrial Goods' },
 	{ ticker: 'PREMPAINTS', company: 'Premium Paints Plc', sector: 'Industrial Goods' },
 	{ ticker: 'TRIPPLEG', company: 'Tripple Gee & Company Plc', sector: 'Industrial Goods' },
-	{ ticker: 'WAPCO', company: 'Lafarge Africa Plc', sector: 'Industrial Goods' },
+	{ ticker: 'HBMNG', company: 'HBM Nigeria Plc', sector: 'Industrial Goods', formerName: 'Lafarge Africa Plc (formerly WAPCO)' },
 
 	// ── Oil and Gas ──
 	{ ticker: 'ARADEL', company: 'Aradel Holdings Plc', sector: 'Oil and Gas' },
