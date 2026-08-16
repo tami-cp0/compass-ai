@@ -14,13 +14,9 @@ Before you can run the stack you need:
 | ----------- | ----- |
 | **Node.js 20+** | The API targets Node 20 (`@types/node@20`). |
 | **pnpm 11.4.0** | Pinned via the root `packageManager` field. Install with `corepack enable && corepack prepare pnpm@11.4.0 --activate`. |
-| **A running Redis** | Any Redis 6/7. Locally: `docker run -p 6379:6379 redis:7-alpine`. Stores conversation history and Gemini Live resumption handles. |
-| **Google Gemini API key** | Powers the live voice session (the "front desk"). |
-| **OpenAI API key + a Vector Store** | Powers stock research. You must create a Vector Store in your OpenAI account and put its id in `OPENAI_VECTOR_STORE_ID`; the repo cannot provide this for you. |
-| **Anthropic (Claude) API key** | Drives the web-automation agent. |
 | **Google Chrome** | To load the MV3 extension unpacked. |
 
-> Compass AI needs its own credentials for **three** separate AI providers plus Redis. There is no bundled or free tier — being public on GitHub does not make it runnable without these.
+> The API's env holds only **model ids**, not API keys — the Gemini and Claude keys are provided per-user by the extension at session start (see the side panel). Conversation history and Gemini Live resumption handles are kept in-process, so there is no database or Redis to run.
 
 ---
 
@@ -47,12 +43,12 @@ Then fill in both `.env` files. **Every value is required** — the API and the 
 | `INSTANCE_ID` | Optional. Stable id for multi-instance deploys; falls back to hostname. |
 | `DEBUG_SESSION_IDS` | Optional. Comma-separated session ids to force to `debug`. |
 | `ALLOWED_ORIGINS` | Comma-separated allowed WS origins. Ignored when `NODE_ENV=development`; required otherwise. |
-| `REDIS_URL` | e.g. `redis://localhost:6379`. |
-| `GEMINI_API_KEY` / `GEMINI_LIVE_MODEL` | Google Gemini Live credentials + model id. |
-| `OPENAI_API_KEY` | OpenAI key for the research agent. |
-| `OPENAI_VECTOR_STORE_ID` | Id of a Vector Store you created in your OpenAI account. |
-| `OPENAI_RESEARCH_MODEL` / `OPENAI_ALT_RESEARCH_MODEL` | Deep-research model and the fast `quick_search` model. |
-| `CLAUDE_API_KEY` / `CLAUDE_WEB_MODEL` | Anthropic key + model for the web-automation agent. |
+| `GEMINI_LIVE_MODEL` | Model id for the Gemini Live voice session. |
+| `GEMINI_RESEARCH_FAST_MODEL` | Model for the research fast/triage lane (e.g. Flash-Lite) — answers simple lookups, escalates the rest. Google Search grounding. |
+| `GEMINI_RESEARCH_DEEP_MODEL` | Model for the research deep lane (e.g. Flash 3.6) — runs on escalation with URL-context reads + high thinking. Google Search grounding. |
+| `CLAUDE_WEB_MODEL` | Model id for the web-automation agent. |
+
+> No API keys live here — the Gemini and Claude keys are supplied per-user by the extension at session start.
 
 ### `apps/extension/.env`
 
@@ -61,14 +57,12 @@ Plasmo inlines `PLASMO_PUBLIC_*` variables at build time.
 | Variable | What it is |
 | -------- | ---------- |
 | `PLASMO_PUBLIC_WS_URL` | API WebSocket endpoint, e.g. `ws://localhost:8787/ws` in dev. |
-| `PLASMO_PUBLIC_HOST_MATCH` | Host the extension activates on, e.g. `https://app.atlassportfolios.com/*`. |
 
 ---
 
 ## Running the stack
 
 ```bash
-# Start Redis first (see prerequisites), then:
 pnpm dev
 ```
 
@@ -78,7 +72,7 @@ To load the extension in Chrome:
 
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Click **Load unpacked** and select `apps/extension/build/chrome-mv3-dev/`.
-3. Navigate to the host matched by `PLASMO_PUBLIC_HOST_MATCH` and look for the floating pill.
+3. Navigate to any page and look for the floating pill.
 
 The extension's `chrome-extension://<id>` changes per machine/profile. In production that id must be listed in the API's `ALLOWED_ORIGINS`.
 
@@ -104,7 +98,7 @@ pnpm --filter @compass-ai/types build       # rebuild shared types
 
 See the [root README](README.md) for the architecture overview and each package's README (`apps/api`, `apps/extension`, `packages/types`) for package-specific detail. In brief:
 
-- **`apps/api`** — uWebSockets.js gateway, Gemini Live session, research + web agents, Redis state.
+- **`apps/api`** — uWebSockets.js gateway, Gemini Live session, research + web agents, in-memory session state.
 - **`apps/extension`** — Plasmo MV3 extension: pill UI, mic capture, audio playback, DOM/vision.
 - **`packages/types`** — shared WebSocket wire-protocol and session/task types.
 

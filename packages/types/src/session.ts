@@ -16,9 +16,9 @@ export interface SessionState {
   sessionId:      string
   send:           (msg: ServerMessage) => void
 
-  // One deep-research task at a time. (A quick search may run alongside it —
-  // tracked in the TaskManager, not as a slot here.)
-  researchSlots:  [Task | null]
+  // Up to two research tasks in parallel, so a quick lookup isn't stuck behind
+  // a running deep analysis (both go through the same grounded-prose agent).
+  researchSlots:  [Task | null, Task | null]
   automationSlot: Task | null
   cancelledTasks: Set<string>
 }

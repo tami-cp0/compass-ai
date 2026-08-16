@@ -1,4 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
+import type Anthropic from '@anthropic-ai/sdk';
+import type { GoogleGenAI } from '@google/genai';
 import type {
 	AgentAction,
 	Box,
@@ -8,13 +10,14 @@ import type {
 } from '@compass-ai/types';
 import type { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
 import { HELP_TOPICS } from '../agents/conversation/live-config.js';
-import { runResearchAgent, runQuickSearch } from '../agents/research/research-agent.js';
+import { runResearchAgent } from '../agents/research/research-agent.js';
 import { runWebAgentStep, type WebObservation } from '../agents/web/web-step.js';
 import { scaleAction } from '../agents/web/web-tools.js';
 import { WebAgentMemory } from '../agents/web/web-memory.js';
 import { sessionLogger, type Logger } from '../infra/logger.js';
 import { TokenTracker } from '../infra/token-tracker.js';
 import { nowReadableWAT } from '../infra/datetime.js';
+import { classifyProviderError } from '../infra/provider-errors.js';
 
 export interface SessionMetrics {
 	researchDispatched: number;
@@ -35,6 +38,10 @@ const DEFAULT_ACTION_TIMEOUT_MS = 20_000;
 export class TaskManager {
 	private session: SessionState;
 	private gemini: GeminiLiveSession;
+	// Per-session LLM clients, built from the user's keys. `claude` is null when
+	// web automation is toggled off (no Claude key was provided).
+	private geminiClient: GoogleGenAI;
+	private claudeClient: Anthropic | null;
 	private log!: Logger;
 	readonly tokens: TokenTracker;
 	private abortControllers: Map<string, AbortController> = new Map();
@@ -66,9 +73,16 @@ export class TaskManager {
 		(msg: Extract<ExtensionMessage, { type: 'page_data_response' }> | null) => void
 	>();
 
-	constructor(session: SessionState, gemini: GeminiLiveSession) {
+	constructor(
+		session: SessionState,
+		gemini: GeminiLiveSession,
+		geminiClient: GoogleGenAI,
+		claudeClient: Anthropic | null
+	) {
 		this.session = session;
 		this.gemini = gemini;
+		this.geminiClient = geminiClient;
+		this.claudeClient = claudeClient;
 		this.log = sessionLogger(session.sessionId);
 		this.tokens = new TokenTracker(session.sessionId);
 		gemini.setTokenTracker(this.tokens);
@@ -154,41 +168,10 @@ export class TaskManager {
 		};
 	}
 
-	// A quick_search runs inline (not through a research slot): it's fast and
-	// cheap, and the live agent awaits the answer rather than being pinged later.
-	// One at a time — it can run alongside the (single) deep research. It drives
-	// the same pill chip as research so the user sees the lookup happening.
-	private quickSearchRunning = false;
-
-	async quickSearch(query: string): Promise<Record<string, unknown>> {
-		if (this.quickSearchRunning) {
-			return { status: 'rejected', reason: 'quick_search_already_running' };
-		}
-		this.quickSearchRunning = true;
-		const taskId = uuidv4();
-		const name = `quick: ${query.slice(0, 60)}`;
-		this.log.info('Quick search dispatched', { taskId, query: query.slice(0, 120) });
-		this._sendResearchStatus(taskId, name, 'started');
-		try {
-			const { answer, usage } = await runQuickSearch(query);
-			this.tokens.recordResearch(taskId, 'quick_search', usage, 'quick');
-			this._sendResearchStatus(taskId, name, 'completed');
-			this.log.info('Quick search completed', { taskId });
-			return { status: 'ok', answer };
-		} catch (err: unknown) {
-			const error = err instanceof Error ? err : new Error(String(err));
-			this._sendResearchStatus(taskId, name, 'failed');
-			this.log.error('Quick search failed', { taskId, error });
-			return { status: 'error', error: error.message };
-		} finally {
-			this.quickSearchRunning = false;
-		}
-	}
-
 	private _runResearch(task: Task, slotIndex: number, signal: AbortSignal): void {
 		const { taskId, name, description } = task;
 
-		runResearchAgent(description, signal)
+		runResearchAgent(this.geminiClient, description, signal)
 			.then(({ result, usage }) => {
 				if (this.session.cancelledTasks.has(taskId)) {
 					this.log.debug('Research result discarded — task was cancelled', { taskId });
@@ -196,8 +179,11 @@ export class TaskManager {
 				}
 				(this.session.researchSlots as Array<Task | null>)[slotIndex] = null;
 				this.abortControllers.delete(taskId);
-				this.tokens.recordResearch(taskId, name, usage, 'deep');
-				const body = JSON.stringify(result);
+				this.tokens.recordResearch(taskId, name, usage);
+				// tier is internal accounting — strip it from what the live agent
+				// sees (it only wants answer + sources).
+				const { tier, ...payloadResult } = result;
+				const body = JSON.stringify(payloadResult);
 				const MAX = 10_000;
 				const trimmed = body.length > MAX ? body.slice(0, MAX) + '\n[...truncated]' : body;
 				// Pre-inject the pane guide (silent context) ahead of the first
@@ -215,6 +201,7 @@ export class TaskManager {
 				this.log.info('Research completed', {
 					taskId,
 					name,
+					tier,
 					durationMs: Date.now() - task.startedAt,
 					byteLength: body.length,
 					truncated: body.length > MAX,
@@ -228,8 +215,23 @@ export class TaskManager {
 				(this.session.researchSlots as Array<Task | null>)[slotIndex] = null;
 				this.abortControllers.delete(taskId);
 				const error = err instanceof Error ? err : new Error(String(err));
+				// Research uses the user's Gemini key (same as the live session). If
+				// it failed because the key is invalid or out of credits, the whole
+				// Gemini key is dead — surface the popup so the user can fix it.
+				const classified = classifyProviderError('gemini', err);
+				const isKeyIssue = classified.kind === 'credits' || classified.kind === 'invalid_key';
+				if (isKeyIssue) {
+					this.session.send({
+						type: 'session_error',
+						reason: classified.reason,
+						kind: classified.kind,
+						provider: 'gemini',
+					});
+				}
 				this.gemini.injectContent(
-					`[research error] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}`,
+					isKeyIssue
+						? `[research error] Task "${name}" could not run: ${classified.reason} A popup has told the user to fix their Gemini key/billing. Briefly let them know research is unavailable until that's resolved; do not retry.\nFailed at: ${nowReadableWAT()}`
+						: `[research error] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}`,
 					{ kind: 'result' }
 				);
 				this._sendResearchStatus(taskId, name, 'failed');
@@ -244,6 +246,12 @@ export class TaskManager {
 	}
 
 	dispatchAutomation(name: string, description: string): Record<string, unknown> {
+		// Web automation is a user toggle: with it off (no Claude key provided),
+		// there's no client to drive the browser. Reject cleanly — same shape the
+		// live agent already handles for a full slot.
+		if (this.claudeClient === null) {
+			return { status: 'rejected', reason: 'web_automation_disabled' };
+		}
 		if (this.session.automationSlot !== null) {
 			return {
 				status: 'rejected',
@@ -466,10 +474,27 @@ export class TaskManager {
 			this.abortControllers.delete(taskId);
 			const error = err instanceof Error ? err : new Error(String(err));
 			this._sendAutomationEnd(taskId, 'error', error.message);
+
+			// If the automation died because Claude rejected the key or the
+			// account is out of credits, surface the popup — the user can't fix it
+			// from Gemini's narration alone. Voice stays alive; only web
+			// automation is dead until they update the key.
+			const classified = classifyProviderError('claude', err);
+			const isKeyIssue = classified.kind === 'credits' || classified.kind === 'invalid_key';
+			if (isKeyIssue) {
+				this.session.send({
+					type: 'session_error',
+					reason: classified.reason,
+					kind: classified.kind,
+					provider: 'claude',
+				});
+			}
 			const progressLog = memory.renderProgressLog();
 			const logSegment = progressLog ? `\n${progressLog}` : '';
 			this.gemini.injectContent(
-				`[automation context] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}${logSegment}\nautomation_slot_freed: true`,
+				isKeyIssue
+					? `[automation context] Task "${name}" could not run: ${classified.reason} A popup has told the user to fix their Claude key/billing. Briefly let them know web automation is unavailable until that's resolved; do not retry.\nGoal: ${description}\nautomation_slot_freed: true\nFailed at: ${nowReadableWAT()}`
+					: `[automation context] Task "${name}" failed: ${error.message}\nFailed at: ${nowReadableWAT()}\nGoal: ${description}${logSegment}\nautomation_slot_freed: true`,
 				{ kind: 'result' }
 			);
 			this.metrics.automationFailed++;
@@ -520,7 +545,7 @@ export class TaskManager {
 				actionResults: lastActionResults,
 			};
 
-			const { step, usage } = await runWebAgentStep(memory, observation);
+			const { step, usage } = await runWebAgentStep(this.claudeClient!, memory, observation);
 			this.tokens.recordAutomationStep(taskId, name, memory.stepCount + 1, usage);
 
 			if (this._isCancelled(taskId, task, 'after agent step', memory.stepCount)) return;

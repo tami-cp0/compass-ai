@@ -11,8 +11,8 @@ The Node.js back end for Compass AI. A single uWebSockets.js process that hosts 
 This service is consumed by exactly one client: the [Compass AI browser extension](../extension/). The extension opens a single WebSocket per user session and streams 16 kHz PCM mic audio over it; the API streams Gemini's PCM audio replies back. In between, the API:
 
 - Holds a persistent **Gemini Live** session per WS connection (the "front desk")
-- Runs background **research** (OpenAI Responses API with `web_search`) and **web automation** (Anthropic Claude driving DOM actions in the extension) jobs (the "back office")
-- Persists session state, in-flight tasks, and token usage in **Redis**
+- Runs background **research** (Gemini with Grounding with Google Search) and **web automation** (Anthropic Claude driving DOM actions in the extension) jobs (the "back office")
+- Keeps session state, in-flight tasks, conversation history, and Gemini resumption handles **in-process** (no external store)
 - Streams tool-call results back into the live session as content parts so Gemini can speak the answer naturally
 
 ---
@@ -24,30 +24,31 @@ This service is consumed by exactly one client: the [Compass AI browser extensio
 ```
 src/
 ├── core/
-│   ├── index.ts            # Entrypoint: connect Redis, start server, graceful shutdown
+│   ├── index.ts            # Entrypoint: load env, start server, graceful shutdown
 │   ├── server.ts           # uWebSockets.js app, WS upgrade + origin allowlist, pin-pane handlers
-│   ├── session-store.ts    # Redis-backed session lookup
+│   ├── session-store.ts    # In-memory WS session registry
 │   ├── task-manager.ts     # Concurrency limits (research x1, automation x1) + task routing
 │   └── pane-estimate.ts    # Pin-pane sizing/fence helpers
 ├── agents/
 │   ├── conversation/       # Gemini Live session + live-config (tools, system prompt)
-│   ├── research/           # OpenAI Responses API with web_search (deep + quick_search)
+│   ├── research/           # Gemini with Google Search grounding (single grounded-prose agent)
 │   └── web/                # Web automation agent (Anthropic Claude + DOM tools, memory, steps)
 ├── data/
 │   ├── ngx-equities.ts     # NGX equities lookup
 │   └── ngx-equities-data.ts# Bundled NGX equities dataset
 └── infra/
     ├── logger.ts           # pino with redaction, session-scoped child loggers
-    ├── redis.ts            # ioredis client + connectRedis()
+    ├── env.ts              # loads .env (side-effect import, first in entrypoint)
+    ├── session-history.ts  # in-memory conversation history + Gemini resumption handles
     ├── token-tracker.ts    # Per-session token accounting
     └── datetime.ts         # Date/time helpers
 ```
 
 ### Key patterns
 
-- **Concurrency limits.** `TaskManager` enforces ≤1 deep research job and ≤1 automation per session; a fast inline `quick_search` may run alongside the deep research. New requests beyond the limit are rejected with a structured error that Gemini relays to the user.
+- **Concurrency limits.** `TaskManager` enforces ≤2 research jobs and ≤1 automation per session. Research runs through a single grounded-prose agent whose depth scales with the query (a line for a plain fact, paragraphs for a causal question), so a quick lookup and a deep analysis share the same two slots. New requests beyond the limit are rejected with a structured error that Gemini relays to the user.
 - **Origin allowlist.** In production, `ALLOWED_ORIGINS` is enforced on the WS upgrade; in development it is ignored so unpacked extensions on any chrome-extension://... id can connect.
-- **Stateless across restarts.** Session metadata lives in Redis; live Gemini sessions do not survive a restart by design (the extension re-handshakes).
+- **Stateless across restarts.** Session state (metadata, conversation history, resumption handles) lives in-process and does not survive an API restart by design; the extension re-handshakes and starts fresh.
 
 ---
 
@@ -126,7 +127,7 @@ If you find yourself logging something that could contain secrets or large binar
 Pass errors via `meta.error` and the wrapper will serialize `name`, `message`, `stack`, and `code` for you:
 
 ```ts
-log.error("Redis publish failed", { error: err, channel })
+log.error("appendTurn failed", { error: err, turn: "user" })
 ```
 
 ---
@@ -141,4 +142,4 @@ The API is a single long-running Node process. To deploy:
 4. Run `node dist/src/core/index.js`. Front the WS port with a TLS terminator that preserves the `Origin` header so `ALLOWED_ORIGINS` enforcement works.
 5. Point the deployed extension's WS URL at the new host.
 
-Redis must be reachable from the API process; the published extension's manifest `host_permissions` must include the production host.
+The published extension's manifest `host_permissions` must include the production host. Note that session state is in-process: a restart drops active sessions (they reconnect fresh), and running multiple API instances would not share state.
