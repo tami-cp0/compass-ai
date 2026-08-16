@@ -1,8 +1,21 @@
+// User-provided LLM API keys, sent per session. Held only in server memory for
+// the life of the socket — never persisted, never logged. `claude` is present
+// only when web automation is toggled on.
+export interface SessionKeys {
+  gemini: string
+  claude?: string
+}
+
 // Extension → Gateway → Node
 export type ExtensionMessage =
-  | { type: "session_start" }
-  | { type: "session_resume"; sessionId: string }
+  | { type: "session_start"; keys: SessionKeys; webAutomation: boolean; email: string; voiceName: string }
+  | { type: "session_resume"; sessionId: string; keys: SessionKeys; webAutomation: boolean; email: string; voiceName: string }
   | { type: "session_end" }
+  // Application-level keepalive. Browsers can't send WS control-frame pings, so
+  // the SW sends this on an interval to keep both the socket and (via WS
+  // traffic) the MV3 service worker itself alive during quiet moments. The
+  // server ignores it.
+  | { type: "ping" }
   | { type: "audio_chunk"; sessionId: string; data: string; mimeType: "audio/pcm" }
   | { type: "screenshot_response"; sessionId: string; requestId: string; dataUrl: string }
   | { type: "page_data_response"; sessionId: string; requestId: string; data: string; truncated: boolean; error?: string }
@@ -17,6 +30,20 @@ export type ExtensionMessage =
 export type ServerMessage =
   | { type: "audio_chunk"; sessionId: string; data: string; mimeType: "audio/pcm" }
   | { type: "session_init"; sessionId: string }
+  // Session could not start, or a provider rejected a call. The extension ends
+  // the session and surfaces a popup keyed by `kind` + `provider`. `reason` is
+  // human text for logging/fallback. `kind`/`provider` are machine-readable so
+  // the UI can pick the right popup (out of credits vs invalid key vs missing
+  // key); classification lives server-side against verified provider codes:
+  //   credits:     Claude 402 billing_error / Gemini 429 RESOURCE_EXHAUSTED
+  //   invalid_key: Claude 401 authentication_error / Gemini 400 API_KEY_INVALID
+  //   missing_key: no key supplied for a required provider (pre-flight)
+  | {
+      type: "session_error"
+      reason: string
+      kind?: "credits" | "invalid_key" | "missing_key" | "other"
+      provider?: "gemini" | "claude"
+    }
   | { type: "screenshot_request"; sessionId: string; requestId: string }
   | { type: "page_data_request"; sessionId: string; requestId: string; box: Box; physicalPixels: boolean }
   | { type: "research_status"; sessionId: string; taskId: string; name: string; status: "started" | "completed" | "failed" | "cancelled" }

@@ -1,10 +1,24 @@
+export interface SessionKeys {
+    gemini: string;
+    claude?: string;
+}
 export type ExtensionMessage = {
     type: "session_start";
+    keys: SessionKeys;
+    webAutomation: boolean;
+    email: string;
+    voiceName: string;
 } | {
     type: "session_resume";
     sessionId: string;
+    keys: SessionKeys;
+    webAutomation: boolean;
+    email: string;
+    voiceName: string;
 } | {
     type: "session_end";
+} | {
+    type: "ping";
 } | {
     type: "audio_chunk";
     sessionId: string;
@@ -54,6 +68,11 @@ export type ServerMessage = {
 } | {
     type: "session_init";
     sessionId: string;
+} | {
+    type: "session_error";
+    reason: string;
+    kind?: "credits" | "invalid_key" | "missing_key" | "other";
+    provider?: "gemini" | "claude";
 } | {
     type: "screenshot_request";
     sessionId: string;
