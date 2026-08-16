@@ -1,6 +1,6 @@
 # Compass AI
 
-A voice copilot for [Atlass Portfolios](https://app.atlassportfolios.com). The user speaks to an AI assistant that can automate the page on their behalf and research stocks in real time, without the assistant ever going silent.
+A voice copilot for the stock market. The user speaks to an AI assistant that can automate the page on their behalf and research stocks in real time, without the assistant ever going silent.
 
 > **License:** MIT. Contributions are accepted under the same license — see [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -33,14 +33,11 @@ cp apps/api/.env.example apps/api/.env
 cp apps/extension/.env.example apps/extension/.env
 #   then edit both — every value is required and the app throws at startup if missing
 
-# 3. Start Redis locally (or point REDIS_URL at a remote one)
-#   e.g. docker run -p 6379:6379 redis:7-alpine
-
-# 4. Run the whole stack in dev mode (API + extension HMR)
+# 3. Run the whole stack in dev mode (API + extension HMR)
 pnpm dev
 ```
 
-Then load the extension build at `apps/extension/build/chrome-mv3-dev/` as an unpacked extension in Chrome and navigate to `https://app.atlassportfolios.com`.
+Then load the extension build at `apps/extension/build/chrome-mv3-dev/` as an unpacked extension in Chrome and navigate to any page — the pill activates on all sites.
 
 ---
 
@@ -94,4 +91,4 @@ Compass AI is licensed under the **MIT License**. See [LICENSE](LICENSE) for the
 
 MIT is a permissive license: you may use, copy, modify, and distribute the software — including in closed-source and commercial products — provided you keep the copyright notice and license text. The software is provided "as is", without warranty.
 
-**Disclaimer:** Compass AI is an independent, unaffiliated project. It is **not** affiliated with, associated with, authorized by, endorsed by, or in any way officially connected to Atlass Portfolios or its owners. "Atlass Portfolios" and any related names or marks are the property of their respective owners and are used here only to describe the third-party website this tool interoperates with.
+**Disclaimer:** Compass AI is an independent, unaffiliated project. It is **not** affiliated with, associated with, authorized by, endorsed by, or in any way officially connected to any third-party stockbroking platform or its owners. Any platform names or marks referenced in configuration are the property of their respective owners and are used here only to describe the third-party websites this tool can interoperate with.

@@ -1,6 +1,6 @@
 {
   "name": "compass-ai",
-  "description": "AI assistant for atlass portfolio",
+  "description": "AI assistant for the stock market",
   "private": true,
   "scripts": {
     "dev": "turbo dev",
