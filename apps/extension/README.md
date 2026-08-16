@@ -1,6 +1,6 @@
 # @compass-ai/extension
 
-The Chrome MV3 browser extension that is the user-facing half of Compass AI. Renders the floating "pill" UI on [Atlass Portfolios](https://app.atlassportfolios.com), captures the user's microphone, plays the assistant's voice back, and executes the DOM actions the API requests.
+The Chrome MV3 browser extension that is the user-facing half of Compass AI. Renders the floating "pill" UI on the configured stockbroking site, captures the user's microphone, plays the assistant's voice back, and executes the DOM actions the API requests.
 
 > For monorepo bootstrapping and the overall architecture, see the [root README](../../README.md).
 
@@ -8,7 +8,7 @@ The Chrome MV3 browser extension that is the user-facing half of Compass AI. Ren
 
 ## Purpose
 
-This is the only client of [`@compass-ai/api`](../api/). It is scoped exclusively to the host defined by `PLASMO_PUBLIC_HOST_MATCH` and does three things:
+This is the only client of [`@compass-ai/api`](../api/). It runs on all sites (`<all_urls>`) and does three things:
 
 1. **Voice I/O.** Captures 16 kHz PCM mic audio in an AudioWorklet and streams it over WebSocket; receives PCM from the API and plays it through the Web Audio API.
 2. **Vision + page data.** Streams `vision_frame`s for the live session, and replies to `agent_observation_request` / `screenshot_request` / `page_data_request` with a screenshot (plus geometry) and extracted text so the agents can reason about the live UI.
@@ -29,7 +29,7 @@ src/
 │   ├── pcm-capture.ts        # MediaStream → AudioWorklet wiring
 │   ├── pcm-capture-worklet.js# AudioWorklet: downsample + post int16 frames
 │   └── pcm-player.ts         # Web Audio queue + scheduling for inbound PCM
-├── contents/                 # Plasmo content scripts (run on the matched host)
+├── contents/                 # Plasmo content scripts (run on all sites)
 │   ├── pill.tsx              # Floating React pill UI (mic, state, bars, edge glow)
 │   ├── pin-panel.tsx         # Pinned markdown pane rendered next to the pill
 │   ├── components/           # Pill subcomponents (icon, frequency bars, chips, ...)
@@ -71,7 +71,7 @@ Run from `apps/extension/` (or with `pnpm --filter @compass-ai/extension <script
 1. `pnpm --filter @compass-ai/extension dev`
 2. Open `chrome://extensions`, enable Developer mode
 3. Click "Load unpacked", point at `apps/extension/build/chrome-mv3-dev/`
-4. Navigate to the matched host and look for the pill
+4. Navigate to any page and look for the pill
 
 The extension's chrome-extension://... ID changes per machine/profile. In production, that ID goes into the API's `ALLOWED_ORIGINS`.
 

@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Compass side panel — preview</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          orbitron: ['"Orbitron"', "system-ui", "sans-serif"],
+          excessive: ['"Excessive"', "system-ui", "sans-serif"]
+        }
+      }
+    }
+  }
+</script>
+<style>
+  @font-face {
+    font-family: "Orbitron";
+    src: url("./styles/fonts/Orbitron.ttf") format("truetype-variations");
+    font-weight: 400 900;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: "Excessive";
+    src:
+      url("./styles/fonts/Excessive-ExtraCondensed.woff2") format("woff2"),
+      url("./styles/fonts/Excessive-ExtraCondensed.woff") format("woff");
+    font-weight: 400;
+    font-style: normal;
+  }
+
+  .glass-emerald {
+    background: linear-gradient(
+      135deg,
+      hsla(161, 65%, 20%, 0.6) 0%,
+      hsla(161, 65%, 30%, 0.4) 40%,
+      hsla(161, 65%, 40%, 0.5) 60%,
+      hsla(161, 65%, 15%, 0.6) 100%
+    );
+    box-shadow:
+      inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
+      inset 0 -1px 0 hsla(161, 65%, 10%, 0.4),
+      0 4px 16px hsla(161, 65%, 30%, 0.4);
+  }
+
+  body { background: #0a0a0a; overflow: hidden; }
+
+  .spin-slow {
+    animation: spin-slow 6s linear infinite;
+    transform-box: view-box;
+    transform-origin: 52.2% 49.3%;
+  }
+  @keyframes spin-slow {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  /* Polished emerald text with a light sweep travelling across it. A deep
+     emerald gradient body + a bright specular band that moves, clipped to the
+     glyphs. */
+  .glass-text {
+    background:
+      /* soft, wide, feathered glint — fades in and out, drifts slowly */
+      linear-gradient(
+        145deg,
+        transparent 30%,
+        hsla(161,45%,85%,0.0) 42%,
+        hsla(161,45%,88%,0.35) 50%,
+        hsla(161,45%,85%,0.0) 58%,
+        transparent 70%
+      ),
+      /* emerald body with its OWN bright centre (like the small button's
+         diagonal sheen, but built in so it survives the huge scale). Emerald =
+         slightly bluer hue (158) + high saturation. */
+      linear-gradient(
+        145deg,
+        hsla(158,80%,14%,0.75) 0%,
+        hsla(158,75%,26%,0.6) 38%,
+        hsla(159,70%,40%,0.68) 52%,
+        hsla(158,75%,24%,0.62) 66%,
+        hsla(158,82%,12%,0.78) 100%
+      );
+    background-size: 320% 100%, 100% 100%;
+    background-position: 250% 0, 0 0;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: glass-text-shine 20s linear infinite;
+  }
+  /* Both ends sit with the glint fully off the text (transparent), so the loop
+     snap is invisible. A pause is baked in by holding the off-screen position
+     for most of the cycle. */
+  @keyframes glass-text-shine {
+    0%   { background-position: 250% 0, 0 0; }
+    45%  { background-position: -150% 0, 0 0; }
+    100% { background-position: -150% 0, 0 0; }
+  }
+
+  /* Near-neutral frosted glass — the "Get started" pill body. Faintly tinted,
+     lighter than the emerald disc so the disc reads as an icon-badge on top. */
+  .glass-neutral {
+    position: relative;
+    isolation: isolate;
+    background:
+      /* vertical falloff — clearer up top, settles darker at the base */
+      linear-gradient(
+        180deg,
+        hsla(160, 22%, 90%, 0.16) 0%,
+        hsla(160, 18%, 70%, 0.04) 55%,
+        hsla(160, 20%, 40%, 0.10) 100%
+      ),
+      /* diagonal warm greenish-grey body */
+      linear-gradient(
+        135deg,
+        hsla(160, 25%, 85%, 0.24) 0%,
+        hsla(160, 20%, 88%, 0.16) 45%,
+        hsla(160, 25%, 84%, 0.26) 60%,
+        hsla(160, 20%, 78%, 0.20) 100%
+      );
+    -webkit-backdrop-filter: blur(9px) saturate(1.25);
+    backdrop-filter: blur(9px) saturate(1.25);
+    box-shadow:
+      /* sharp lit top rim (specular lip) */
+      inset 0 1.5px 0.5px hsla(0, 0%, 100%, 0.6),
+      /* thickness ring — a faint bright edge around the whole perimeter */
+      inset 0 0 0 1px hsla(0, 0%, 100%, 0.12),
+      /* dark base lip */
+      inset 0 -2px 2px hsla(160, 30%, 8%, 0.4),
+      /* grounding drop */
+      0 6px 20px hsla(0, 0%, 0%, 0.4);
+  }
+  /* faint grain so the surface isn't a dead-clean gradient */
+  .glass-neutral::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    z-index: -1;
+    opacity: 0.5;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* ── Get-started pill → pane morph ─────────────────────────── */
+  /* The morph follows the real pane's discipline: never animate height & a
+     pill radius toward a square (that's what makes a circle). We use a FIXED
+     1.75rem radius (= half the pill height) everywhere, never 9999px, so no
+     stage can pass through a full circle. Width grows first, height second. */
+  #gs-wrap {
+    position: relative;
+    width: 20rem;
+    height: 3.5rem;
+    border-radius: 1.75rem;
+    overflow: hidden;
+    cursor: pointer;
+    transition: height 380ms ease-out;   /* only height animates (pane grow-down) */
+  }
+  #gs-wrap.pane {
+    height: 13rem;
+    cursor: default;
+  }
+
+  /* emerald layer: small disc → pill-height bar (s1) → fills width (s2).
+     Opaque dark base under the emerald gradient so the grainy pill beneath
+     never shows through — this disc stays clean, no grain. */
+  #gs-emerald {
+    position: absolute;
+    left: 0.375rem;
+    top: 0.375rem;
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: 1.75rem;              /* fixed — matches wrap, never a circle */
+    background:
+      linear-gradient(
+        135deg,
+        hsla(161, 65%, 20%, 0.6) 0%,
+        hsla(161, 65%, 30%, 0.4) 40%,
+        hsla(161, 65%, 40%, 0.5) 60%,
+        hsla(161, 65%, 15%, 0.6) 100%
+      ),
+      #0c1512;                            /* opaque base blocks the grain */
+    transition:
+      width 300ms ease-out,
+      height 280ms ease-out,
+      left 300ms ease-out,
+      top 280ms ease-out;
+  }
+  /* stage 1: disc grows to pill height (width stays at disc width), pinned left.
+     Only height + top change → a valid rounded bar, never a circle. */
+  #gs-wrap.s1 #gs-emerald,
+  #gs-wrap.s2 #gs-emerald,
+  #gs-wrap.pane #gs-emerald {
+    top: 0;
+    height: 100%;
+  }
+  /* stage 2+: fill the full width (height already 100%, so it just widens) */
+  #gs-wrap.s2 #gs-emerald,
+  #gs-wrap.pane #gs-emerald {
+    left: 0;
+    width: 100%;
+  }
+
+  /* compass disc content (icon) stays pinned left */
+  #gs-icon {
+    position: absolute;
+    left: 0.375rem;
+    top: 0.375rem;
+    width: 2.75rem;
+    height: 2.75rem;
+    display: grid;
+    place-items: center;
+    z-index: 3;
+    transition: opacity 260ms ease;
+  }
+  #gs-wrap.pane #gs-icon { opacity: 0; }
+
+  /* "Get started" label — fades out on click */
+  #gs-label {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 3;
+    white-space: nowrap;
+    transition: opacity 200ms ease;
+  }
+  #gs-wrap:not(.idle) #gs-label { opacity: 0; }
+
+  /* pane content — hidden until open, revealed in the light's wake */
+  #gs-content {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 1.5rem 1.25rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 300ms ease;
+  }
+  #gs-wrap.open #gs-content { opacity: 1; pointer-events: auto; }
+
+  /* email field — a frosted slot on the emerald glass, with a leading icon */
+  .gs-field {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    height: 2.6rem;
+    padding: 0 0.85rem;
+    border-radius: 0.7rem;
+    background: hsla(0, 0%, 0%, 0.22);
+    border: 1px solid hsla(0, 0%, 100%, 0.14);
+    box-shadow: inset 0 1px 0 hsla(0, 0%, 100%, 0.06);
+    transition: border-color 160ms ease, box-shadow 160ms ease;
+  }
+  .gs-field:focus-within {
+    border-color: hsla(0, 0%, 100%, 0.4);
+    box-shadow: inset 0 1px 0 hsla(0, 0%, 100%, 0.08);
+  }
+  .gs-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: hsla(0, 0%, 100%, 0.95);
+    font-size: 13px;
+  }
+  .gs-input::placeholder { color: hsla(0, 0%, 100%, 0.4); }
+
+  /* Continue — grainy neutral glass (same material as the pill it came from) */
+  .gs-continue {
+    position: relative;
+    overflow: hidden;              /* clip the grain ::before to the pill */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    height: 2.7rem;
+    border-radius: 9999px;
+    cursor: pointer;
+    font-size: 13.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: hsla(0, 0%, 100%, 0.95);
+    transition: transform 120ms ease, filter 160ms ease;
+  }
+  .gs-continue > * { position: relative; z-index: 1; }  /* keep label above grain */
+  .gs-continue:hover { filter: brightness(1.12); }
+  .gs-continue:active { transform: scale(0.98); }
+  /* drop the grounding drop shadow — the button sits on the pane, not floating
+     over the page, so keep only the glassy inset rims. */
+  .gs-continue.glass-neutral {
+    box-shadow:
+      inset 0 1.5px 0.5px hsla(0, 0%, 100%, 0.6),
+      inset 0 0 0 1px hsla(0, 0%, 100%, 0.12),
+      inset 0 -2px 2px hsla(160, 30%, 8%, 0.4);
+  }
+
+  /* travelling reveal light — a THIN band that actually sweeps across, not a
+     full-pane glow. Sits above the pane and translates fully past the bottom. */
+  #gs-light {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 40%;                 /* thin band relative to the pane */
+    z-index: 5;
+    pointer-events: none;
+    opacity: 0;
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      hsla(161, 45%, 88%, 0.10) 40%,
+      hsla(161, 40%, 92%, 0.30) 50%,
+      hsla(161, 45%, 88%, 0.10) 60%,
+      transparent 100%
+    );
+    transform: translateY(-100%);
+  }
+  #gs-wrap.reveal #gs-light {
+    opacity: 1;
+    animation: gs-sweep 620ms ease-out forwards;
+  }
+  /* band starts fully above the pane, travels to fully below it */
+  @keyframes gs-sweep {
+    from { transform: translateY(-100%); }
+    to   { transform: translateY(250%); }
+  }
+
+  /* ── Closing sequence (on Continue) ──
+     flash clears the content, then the pane collapses bottom-up to height 0. */
+  #gs-wrap { transform-origin: top center; }  /* collapse shrinks from the bottom up */
+
+  /* close: the same soft light sweeps down, clearing the content in its wake.
+     Distinct animation NAME from the open sweep so it actually re-triggers
+     (a browser won't restart an animation of the same name). */
+  #gs-wrap.closing #gs-content { opacity: 0; transition: opacity 420ms ease; }
+  #gs-wrap.closing #gs-light {
+    opacity: 1;
+    animation: gs-sweep-close 520ms ease-in forwards;
+  }
+  @keyframes gs-sweep-close {
+    from { transform: translateY(-100%); }
+    to   { transform: translateY(250%); }
+  }
+
+  /* collapse: height → 0 (bottom-up via transform-origin: top) */
+  #gs-wrap.collapsing {
+    height: 0 !important;
+    transition: height 360ms ease-in;
+  }
+
+  /* settings reveal on the same page after the pane closes */
+  #gs-settings {
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 320ms ease, transform 320ms ease;
+  }
+  #gs-settings.gs-settings-in { opacity: 1; transform: translateY(0); }
+
+  /* ── Minimal settings (hairline sections, no cards) ── */
+  #gs-settings { font-family: ui-sans-serif, system-ui, sans-serif; }
+  .st-section {
+    padding: 1.25rem 0;
+    border-top: 1px solid hsla(0, 0%, 100%, 0.08);
+  }
+  .st-section:first-of-type { border-top: none; }
+  .st-eyebrow {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: hsla(0, 0%, 100%, 0.32);
+    margin-bottom: 1rem;
+  }
+
+  .st-row { margin-bottom: 1rem; }
+  .st-row:last-child { margin-bottom: 0; }
+
+  /* Claude row slides open/closed (can't transition display/height:auto, so we
+     animate max-height + opacity + margin, and let the rows below flow down). */
+  .st-collapsible {
+    overflow: hidden;
+    max-height: 5rem;          /* enough to hold the row */
+    opacity: 1;
+    transition:
+      max-height 320ms ease,
+      opacity 260ms ease,
+      margin-bottom 320ms ease;
+  }
+  .st-collapsible.collapsed {
+    max-height: 0;
+    opacity: 0;
+    margin-bottom: 0;
+    pointer-events: none;
+  }
+  .st-row-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.45rem;
+  }
+  .st-name { font-size: 13px; font-weight: 500; color: hsla(0, 0%, 100%, 0.92); }
+  .st-beta {
+    font-size: 8px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: hsl(161, 60%, 60%);
+    vertical-align: middle;
+    margin-left: 0.35rem;
+    padding: 1px 5px;
+    border: 1px solid hsla(161, 60%, 55%, 0.35);
+    border-radius: 999px;
+  }
+  .st-link {
+    font-size: 11px;
+    color: hsl(161, 60%, 55%);
+    text-decoration: none;
+  }
+  .st-link:hover { text-decoration: underline; }
+
+  .st-input {
+    width: 100%;
+    height: 2.35rem;
+    padding: 0 0.75rem;
+    font-size: 13px;
+    color: hsla(0, 0%, 100%, 0.95);
+    background: hsla(0, 0%, 100%, 0.05);
+    border: 1px solid hsla(0, 0%, 100%, 0.12);
+    border-radius: 0.6rem;
+    outline: none;
+    transition: border-color 150ms ease;
+  }
+  .st-input::placeholder { color: hsla(0, 0%, 100%, 0.3); }
+  .st-input:focus { border-color: hsl(161, 55%, 50%); }
+
+  .st-masked {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .st-masked > span {
+    flex: 1;
+    height: 2.35rem;
+    display: flex;
+    align-items: center;
+    padding: 0 0.75rem;
+    font-size: 13px;
+    color: hsla(0, 0%, 100%, 0.6);
+    background: hsla(0, 0%, 100%, 0.03);
+    border: 1px solid hsla(0, 0%, 100%, 0.08);
+    border-radius: 0.6rem;
+  }
+  .st-trash {
+    height: 2.35rem;
+    width: 2.35rem;
+    display: grid;
+    place-items: center;
+    border: 1px solid hsla(0, 0%, 100%, 0.1);
+    border-radius: 0.6rem;
+    background: transparent;
+    color: hsla(0, 0%, 100%, 0.45);
+    cursor: pointer;
+    transition: all 150ms ease;
+  }
+  .st-trash svg { width: 1rem; height: 1rem; }
+  .st-trash:hover {
+    color: hsla(0, 0%, 100%, 0.85);
+    border-color: hsla(0, 0%, 100%, 0.2);
+    background: hsla(0, 0%, 100%, 0.06);
+  }
+
+  .st-toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  .st-toggle-row:last-child { margin-bottom: 0; }
+  .st-toggle-copy { display: flex; flex-direction: column; gap: 0.15rem; }
+  .st-hint {
+    font-size: 11px;
+    line-height: 1.35;
+    color: hsla(0, 0%, 100%, 0.5);
+    max-width: 15rem;
+  }
+
+  .st-switch {
+    position: relative;
+    flex: none;
+    width: 2.6rem;
+    height: 1.5rem;
+    border-radius: 9999px;
+    border: 1px solid hsla(0, 0%, 100%, 0.15);
+    background: hsla(0, 0%, 100%, 0.06);
+    cursor: pointer;
+    transition: background 200ms ease, border-color 200ms ease;
+  }
+  .st-switch::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 3px;
+    transform: translateY(-50%);
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    background: hsl(0, 0%, 80%);
+    transition: transform 200ms cubic-bezier(0.3, 1.4, 0.5, 1), background 200ms ease;
+  }
+  /* exact .glass-emerald (same gradient + shadow the panes/buttons use) */
+  .st-switch.on {
+    background: linear-gradient(
+      135deg,
+      hsla(161, 65%, 20%, 0.6) 0%,
+      hsla(161, 65%, 30%, 0.4) 40%,
+      hsla(161, 65%, 40%, 0.5) 60%,
+      hsla(161, 65%, 15%, 0.6) 100%
+    );
+    border-color: hsla(161, 65%, 45%, 0.55);
+    box-shadow:
+      inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
+      inset 0 -1px 0 hsla(161, 65%, 10%, 0.4),
+      0 4px 16px hsla(161, 65%, 30%, 0.4);
+  }
+  .st-switch.on::after {
+    transform: translate(1.1rem, -50%);
+    background: #fff;
+  }
+
+  .st-github {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.9rem;
+    font-size: 12px;
+    color: hsla(0, 0%, 100%, 0.45);
+    text-decoration: none;
+    transition: color 150ms ease;
+  }
+  .st-github svg { width: 1rem; height: 1rem; flex: none; }
+  .st-github:hover { color: hsla(0, 0%, 100%, 0.85); }
+
+  .st-foot {
+    margin-top: 1.25rem;
+    font-size: 11px;
+    line-height: 1.5;
+    color: hsla(0, 0%, 100%, 0.3);
+  }
+
+  /* =============================================
+     OUT-OF-CREDITS MODAL
+     Provider-aware. Shown when the API reports the user's Gemini/Claude
+     credits are exhausted (Claude 400 credit_balance_too_low, Gemini 429).
+     ============================================= */
+  #credits-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+    background: hsla(0, 0%, 0%, 0.6);
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+    opacity: 0;
+    /* animate opacity + the display flip together so the fade runs on open,
+       not just on close (needs @starting-style + transition-behavior below). */
+    transition: opacity 220ms ease, display 220ms allow-discrete;
+  }
+  #credits-modal.open { display: flex; opacity: 1; }
+  /* entry state the fade transitions FROM when it first becomes displayed */
+  @starting-style {
+    #credits-modal.open { opacity: 0; }
+  }
+
+  .cm-card {
+    position: relative;
+    width: 100%;
+    max-width: 20rem;
+    border-radius: 1.1rem;
+    padding: 1.4rem 1.3rem 1.3rem;
+    text-align: center;
+    transform: scale(0.94);
+    transition: transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  #credits-modal.open .cm-card { transform: scale(1); }
+
+  /* Thinner glass on the card: over the scrim the shared .glass-neutral fill
+     reads as an opaque slab, so soften the body + grain here only. */
+  .cm-card.glass-neutral {
+    background:
+      linear-gradient(
+        180deg,
+        hsla(160, 22%, 90%, 0.08) 0%,
+        hsla(160, 18%, 70%, 0.02) 55%,
+        hsla(160, 20%, 40%, 0.05) 100%
+      ),
+      linear-gradient(
+        135deg,
+        hsla(160, 25%, 85%, 0.10) 0%,
+        hsla(160, 20%, 88%, 0.06) 45%,
+        hsla(160, 25%, 84%, 0.11) 60%,
+        hsla(160, 20%, 78%, 0.08) 100%
+      );
+    -webkit-backdrop-filter: blur(16px) saturate(1.2);
+    backdrop-filter: blur(16px) saturate(1.2);
+  }
+  .cm-card.glass-neutral::before { opacity: 0.28; }
+
+  /* Emerald action button: keep the glassy inset rims, drop the outer
+     colored bloom that reads as a glow/halo. */
+  .cm-action.glass-emerald {
+    box-shadow:
+      inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
+      inset 0 -1px 0 hsla(161, 65%, 10%, 0.4);
+  }
+  .cm-action.glass-emerald:hover {
+    box-shadow:
+      inset 0 1px 0 hsla(0, 0%, 100%, 0.28),
+      inset 0 -1px 0 hsla(161, 65%, 10%, 0.4);
+  }
+
+  .cm-close {
+    position: absolute;
+    top: 0.7rem;
+    right: 0.7rem;
+    width: 1.6rem;
+    height: 1.6rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 9999px;
+    background: transparent;
+    color: hsla(0, 0%, 100%, 0.4);
+    cursor: pointer;
+    transition: color 150ms ease, background 150ms ease;
+  }
+  .cm-close:hover { color: hsla(0, 0%, 100%, 0.85); background: hsla(0, 0%, 100%, 0.08); }
+  .cm-close svg { width: 1rem; height: 1rem; }
+
+  .cm-icon {
+    width: 2.9rem;
+    height: 2.9rem;
+    margin: 0.2rem auto 0.9rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    background: hsla(0, 0%, 100%, 0.06);
+    box-shadow:
+      inset 0 1px 0 hsla(0, 0%, 100%, 0.14),
+      inset 0 0 0 1px hsla(0, 0%, 100%, 0.08);
+  }
+  .cm-icon svg { width: 1.4rem; height: 1.4rem; color: hsla(0, 0%, 100%, 0.85); }
+
+  .cm-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.95);
+    margin-bottom: 0.4rem;
+  }
+  .cm-body {
+    font-size: 12px;
+    line-height: 1.5;
+    color: hsla(0, 0%, 100%, 0.6);
+    margin-bottom: 1.15rem;
+  }
+
+  .cm-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    width: 100%;
+    height: 2.6rem;
+    border-radius: 0.75rem;
+    font-size: 13px;
+    font-weight: 600;
+    color: hsla(0, 0%, 100%, 0.95);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .cm-action svg { width: 0.95rem; height: 0.95rem; }
+
+  .cm-note {
+    margin-top: 0.85rem;
+    font-size: 10.5px;
+    line-height: 1.45;
+    color: hsla(0, 0%, 100%, 0.32);
+  }
+
+</style>
+</head>
+<body class="text-white/90">
+
+<div class="flex gap-2 p-3 bg-neutral-900 border-b border-white/10">
+  <button onclick="location.reload()" class="px-3 py-1.5 text-xs rounded-md bg-white/10 hover:bg-white/15">↺ Reset onboarding</button>
+  <button onclick="skipToSettings()" class="px-3 py-1.5 text-xs rounded-md bg-white/10 hover:bg-white/15">Skip to settings</button>
+  <button onclick="showCreditsModal('gemini')" class="px-3 py-1.5 text-xs rounded-md bg-white/10 hover:bg-white/15">Credits: Gemini</button>
+  <button onclick="showCreditsModal('claude')" class="px-3 py-1.5 text-xs rounded-md bg-white/10 hover:bg-white/15">Credits: Claude</button>
+  <button onclick="showInvalidKeyModal('gemini')" class="px-3 py-1.5 text-xs rounded-md bg-white/10 hover:bg-white/15">Invalid: Gemini</button>
+  <button onclick="showInvalidKeyModal('claude')" class="px-3 py-1.5 text-xs rounded-md bg-white/10 hover:bg-white/15">Invalid: Claude</button>
+  <button onclick="showMicModal('denied')" class="px-3 py-1.5 text-xs rounded-md bg-white/10 hover:bg-white/15">Mic: blocked</button>
+  <button onclick="showMicModal('missing')" class="px-3 py-1.5 text-xs rounded-md bg-white/10 hover:bg-white/15">Mic: missing</button>
+</div>
+
+<!-- ============ ONBOARDING ============ -->
+<div id="view-onboarding" class="relative overflow-hidden w-[400px] mx-auto h-screen flex flex-col bg-neutral-950 text-white/90 font-orbitron">
+    <p class="glass-text font-excessive text-[23rem] leading-[0.85] overflow-hidden tracking-[-0.4rem] mt-5">COMPASS</p>
+
+  <!-- compass icon defined once, reused via <use> in each pill -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="compass-icon" viewBox="0 0 49.978 49.978">
+      <path d="M45.578,24.516l-4.286-0.635c-0.193-3.89-1.81-7.405-4.356-10.029l4.039-4.038l-0.279-0.28l-4.037,4.036c-2.713-2.656-6.392-4.318-10.453-4.422l-0.568-3.837v3.825l0,0V5.311l-0.57,3.854c-3.899,0.187-7.425,1.804-10.055,4.355l-4.03-3.986l-0.301,0.301l4.028,3.985c-2.621,2.685-4.267,6.312-4.399,10.319l-3.703,0.548l3.705,0.549c0.147,3.952,1.769,7.529,4.342,10.192l-3.975,3.953l0.301,0.301l3.972-3.949c2.674,2.621,6.29,4.271,10.287,4.418l0.567,3.84v-3.812l0,0v3.812l0.567-3.84c3.977-0.146,7.574-1.781,10.244-4.379l4.055,4.053l0.301-0.301L36.92,35.47c2.615-2.688,4.257-6.313,4.385-10.321L45.578,24.516z M21.929,22.418l-4.201,0.622c0.285-1.426,0.94-2.709,1.856-3.768L21.929,22.418z M20.49,18.375c0.987-0.837,2.166-1.439,3.469-1.74l-0.565,3.815L20.49,18.375z M24.095,15.716c-0.213,0.04-0.425,0.086-0.632,0.142l-0.298-1.691c0.388-0.098,0.788-0.16,1.191-0.212L24.095,15.716z M23.256,15.91c-0.647,0.188-1.265,0.444-1.845,0.765l-0.822-1.502c0.74-0.409,1.537-0.726,2.37-0.953L23.256,15.91z M21.229,16.784c-0.525,0.307-1.003,0.679-1.455,1.079l-1.43-1.021c0.623-0.596,1.312-1.123,2.063-1.558L21.229,16.784z M19.061,18.571c-0.427,0.473-0.819,0.979-1.142,1.534l-1.368-1.04c0.417-0.688,0.917-1.313,1.47-1.89L19.061,18.571z M17.809,20.289c-0.324,0.592-0.578,1.229-0.766,1.89l-1.657-0.421c0.246-0.889,0.602-1.729,1.055-2.509L17.809,20.289z M16.991,22.386c-0.067,0.258-0.111,0.521-0.155,0.786l-1.77,0.262c0.059-0.5,0.144-0.991,0.266-1.469L16.991,22.386z M22.858,22.712l1.117,0.776l0.001,0.024c-0.126,0.229-0.215,0.479-0.257,0.746H12.414L22.858,22.712z M19.427,29.845c-0.819-1.003-1.4-2.194-1.675-3.508l3.782,0.562L19.427,29.845z M23.504,28.432l0.634,4.282c-1.46-0.304-2.771-0.99-3.838-1.952L23.504,28.432z M16.847,26.203c0.048,0.297,0.105,0.591,0.185,0.877l-1.692,0.287c-0.12-0.463-0.202-0.941-0.264-1.426L16.847,26.203z M17.085,27.287c0.213,0.703,0.514,1.365,0.881,1.986l-1.553,0.737c-0.436-0.76-0.778-1.575-1.021-2.437L17.085,27.287z M18.076,29.457c0.247,0.395,0.532,0.761,0.833,1.111l-1.017,1.422c-0.512-0.553-0.979-1.146-1.369-1.795L18.076,29.457z M19.585,31.279c0.482,0.453,1.008,0.861,1.581,1.203l-0.948,1.424c-0.744-0.451-1.428-0.992-2.041-1.603L19.585,31.279z M21.348,32.594c0.611,0.346,1.267,0.618,1.955,0.814l-0.44,1.652c-0.871-0.246-1.695-0.599-2.462-1.043L21.348,32.594z M23.51,33.463c0.249,0.064,0.505,0.105,0.761,0.15l0.262,1.771c-0.498-0.062-0.988-0.146-1.463-0.271L23.51,33.463z M23.838,27.775l0.082-0.162l0.688-0.989l0.308-0.019c0.147,0.076,0.303,0.135,0.465,0.18l-0.001,11.4L23.838,27.775z M24.537,24.6c0-0.781,0.637-1.417,1.42-1.417c0.781,0,1.416,0.636,1.416,1.417c0,0.783-0.635,1.42-1.416,1.42C25.174,26.02,24.537,25.383,24.537,24.6z M29.871,26.842l4.021-0.596c-0.271,1.379-0.884,2.632-1.751,3.672L29.871,26.842z M31.218,30.874c-0.901,0.784-1.968,1.381-3.147,1.718l-0.033,0.007v0.003c-0.182,0.051-0.375,0.075-0.562,0.113l0.613-4.143l0.05,0.101L31.218,30.874z M27.97,21.086l-0.671-4.536c1.523,0.281,2.889,0.985,3.996,1.979L27.97,21.086z M32.057,19.31c0.842,0.983,1.45,2.161,1.756,3.463l-3.826-0.566L32.057,19.31z M34.727,22.908c-0.027-0.136-0.043-0.275-0.076-0.41l1.684-0.324c0.076,0.326,0.129,0.661,0.173,0.998L34.727,22.908z M34.598,22.291c-0.205-0.756-0.497-1.473-0.878-2.137l1.524-0.783c0.453,0.807,0.801,1.678,1.035,2.596L34.598,22.291z M33.611,19.972c-0.299-0.496-0.658-0.95-1.041-1.379l1.02-1.427c0.589,0.611,1.111,1.286,1.545,2.023L33.611,19.972z M31.988,17.995c-0.483-0.451-1.008-0.858-1.582-1.196l0.976-1.408c0.722,0.437,1.382,0.961,1.981,1.548L31.988,17.995z M30.223,16.688c-0.578-0.321-1.195-0.581-1.843-0.771l0.569-1.619c0.793,0.241,1.545,0.576,2.248,0.982L30.223,16.688z M28.174,15.862c-0.327-0.088-0.665-0.146-1.005-0.199l-0.261-1.765c0.627,0.066,1.242,0.177,1.834,0.344L28.174,15.862z M27.609,21.562l-0.688,0.987c-0.264-0.124-0.555-0.195-0.859-0.208V11.117L27.609,21.562z M27.343,33.615c0.287-0.047,0.571-0.102,0.849-0.178l0.313,1.687c-0.462,0.118-0.94,0.2-1.423,0.261L27.343,33.615z M28.398,33.387c0.696-0.208,1.354-0.5,1.971-0.857l0.759,1.541c-0.757,0.429-1.563,0.764-2.416,1.002L28.398,33.387z M30.552,32.419c0.491-0.302,0.94-0.66,1.364-1.046l1.43,1.021c-0.613,0.598-1.296,1.125-2.038,1.564L30.552,32.419z M32.656,30.615c0.344-0.396,0.666-0.809,0.938-1.258l1.39,1.006c-0.373,0.598-0.813,1.144-1.291,1.654L32.656,30.615z M33.708,29.175c0.388-0.676,0.688-1.407,0.895-2.177l1.632,0.521c-0.261,0.946-0.646,1.838-1.138,2.661L33.708,29.175z M34.656,26.791c0.053-0.221,0.086-0.449,0.125-0.678l1.75-0.258c-0.054,0.494-0.125,0.984-0.246,1.457L34.656,26.791z M29.328,26.488l-1.115-0.774l-0.039-0.657c0.008-0.038,0.021-0.075,0.025-0.113h11.414c0,0.008-0.002,0.016-0.002,0.024L29.328,26.488z M39.576,23.626l-2.631-0.39c-0.314-2.485-1.436-4.719-3.102-6.426l0.387-0.539l-0.519,0.398c-1.8-1.781-4.201-2.952-6.867-3.199l-0.386-2.607C33.434,11.191,39.062,16.7,39.576,23.626z M25.636,10.839v3.405V10.839L25.636,10.839z M24.811,10.881l-0.391,2.638c-0.45,0.053-0.896,0.12-1.33,0.228l-0.001-0.008l-0.21,0.037l0.005,0.024c-1.869,0.504-3.542,1.482-4.894,2.789l-0.872-0.623l0.634,0.851c-1.723,1.766-2.864,4.096-3.13,6.684l-2.599,0.385C12.407,16.953,17.909,11.376,24.811,10.881z M12.028,25.489l2.619,0.388c0.175,1.588,0.664,3.082,1.43,4.402l0.051,0.104l0.012-0.005c0.424,0.714,0.931,1.37,1.496,1.972l-0.517,0.723l0.711-0.517c1.77,1.789,4.133,2.979,6.768,3.265l0.386,2.611C18.025,38.021,12.447,32.447,12.028,25.489z M25.807,38.475v-3.418V38.475L25.807,38.475z M26.63,38.433l0.388-2.618c2.592-0.279,4.922-1.432,6.68-3.168l0.973,0.694l-0.715-0.968c1.664-1.756,2.765-4.043,3.021-6.584l2.613-0.387C39.211,32.402,33.617,38.018,26.63,38.433z" fill="#fff"/>
+    </symbol>
+  </svg>
+
+  <div id="gs-pill-holder" class="flex items-start justify-center pt-10">
+    <div id="gs-wrap" class="glass-neutral idle" onclick="openPane()">
+      <!-- emerald layer: disc → pill → pane fill -->
+      <div id="gs-emerald" class="glass-emerald"></div>
+      <!-- compass icon, pinned left -->
+      <div id="gs-icon">
+        <svg class="size-7 spin-slow" viewBox="0 0 49.978 49.978"><use href="#compass-icon"/></svg>
+      </div>
+      <!-- label -->
+      <span id="gs-label" class="text-sm text-center font-semibold tracking-wide text-white/90">Get started</span>
+
+      <!-- pane content: email + continue -->
+      <div id="gs-content">
+        <div class="flex flex-col gap-1">
+          <p class="text-[13px] font-semibold text-white leading-tight">Enter your email</p>
+          <p class="text-[11px] text-white/55 leading-snug">This is where it starts.</p>
+        </div>
+
+        <div class="gs-field">
+          <svg class="size-4 shrink-0 text-white/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3.5 7 8.5 6 8.5-6"/>
+          </svg>
+          <input class="gs-input" type="email" placeholder="you@example.com" />
+        </div>
+
+        <button class="gs-continue glass-neutral" onclick="event.stopPropagation(); closePane()">
+          <span>Continue</span>
+          <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+
+      <!-- reveal light -->
+      <div id="gs-light"></div>
+    </div>
+  </div>
+
+  <!-- settings — minimal, hairline-divided sections under COMPASS -->
+  <div id="gs-settings" class="hidden px-6 pb-10 font-sans">
+
+    <!-- API KEYS -->
+    <section class="st-section">
+      <div class="st-eyebrow">API keys</div>
+
+      <!-- Gemini — saved (masked) -->
+      <div id="gemini-row" class="st-row">
+        <div class="st-row-head">
+          <span class="st-name">Gemini</span>
+          <a href="#" class="st-link">Get a key ↗</a>
+        </div>
+        <div class="st-masked">
+          <span class="font-mono tracking-wider">••••••2k3h</span>
+          <button class="st-trash" aria-label="Clear Gemini key">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Claude — empty (input). Slides open only when web automation is on. -->
+      <div id="claude-row" class="st-row st-collapsible">
+        <div class="st-row-head">
+          <span class="st-name">Claude</span>
+          <a href="#" class="st-link">Get a key ↗</a>
+        </div>
+        <input class="st-input font-mono" type="text" placeholder="sk-ant-…" />
+      </div>
+    </section>
+
+    <!-- CAPABILITIES -->
+    <section class="st-section">
+      <div class="st-eyebrow">Capabilities</div>
+
+      <div class="st-toggle-row">
+        <div class="st-toggle-copy">
+          <span class="st-name">Web automation <span class="st-beta font-orbitron">beta</span></span>
+          <span class="st-hint">Let Compass act on the page for you. Requires a Claude key.</span>
+        </div>
+        <button id="web-auto-switch" role="switch" aria-checked="true" onclick="toggleSwitch(this); syncClaude()" class="st-switch on"></button>
+      </div>
+
+      <div class="st-toggle-row">
+        <div class="st-toggle-copy">
+          <span class="st-name">Show pill on pages</span>
+          <span class="st-hint">Turn off to hide Compass without uninstalling it.</span>
+        </div>
+        <button role="switch" aria-checked="false" onclick="toggleSwitch(this)" class="st-switch"></button>
+      </div>
+    </section>
+
+    <a class="st-github" href="https://github.com/tami-cp0/compass-ai" target="_blank" rel="noreferrer">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a12 12 0 0 0-3.79 23.4c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.96 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.63-2.8 5.65-5.48 5.95.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58A12 12 0 0 0 12 .5Z"/></svg>
+      <span>Inspect the open-source code</span>
+    </a>
+
+    <p class="st-foot">Your keys stay in this browser. They're sent to our server only to make your own API calls, and are never stored or logged.</p>
+  </div>
+</div>
+
+<!-- (old separate settings view removed — settings now live under COMPASS on the same page) -->
+
+<!-- ============ API-ERROR MODAL (out of credits / invalid key) ============ -->
+<div id="credits-modal" onclick="if (event.target === this) hideCreditsModal()">
+  <div class="cm-card glass-neutral">
+    <button class="cm-close" onclick="hideCreditsModal()" aria-label="Dismiss">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+
+    <div class="cm-icon">
+      <!-- lucide: wallet -->
+      <svg id="cm-icon-credits" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>
+      <!-- lucide: key-round -->
+      <svg id="cm-icon-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+      <!-- lucide: mic-off (denied) -->
+      <svg id="cm-icon-mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+      <!-- lucide: mic (missing device) -->
+      <svg id="cm-icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>
+    </div>
+
+    <div id="cm-title" class="cm-title"></div>
+    <div id="cm-body" class="cm-body"></div>
+
+    <!-- link action (credits → external console) -->
+    <a id="cm-action-link" class="cm-action glass-emerald" href="#" target="_blank" rel="noreferrer">
+      <span id="cm-action-link-label"></span>
+      <!-- lucide: external-link -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+    </a>
+
+    <!-- button action (invalid key → focus the settings field) -->
+    <button id="cm-action-btn" class="cm-action glass-emerald" onclick="goFixKey()">
+      <span id="cm-action-btn-label"></span>
+      <!-- lucide: pencil -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>
+    </button>
+
+    <!-- retry action (mic → re-request permission / device) -->
+    <button id="cm-action-retry" class="cm-action glass-emerald" onclick="retryMic()">
+      <span id="cm-action-retry-label"></span>
+      <!-- lucide: rotate-cw -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    </button>
+
+    <p id="cm-note" class="cm-note"></p>
+  </div>
+</div>
+
+<script>
+  // Get-started morph sequence, driven off transitionend like the real pane:
+  // click → s1 (disc→pill height) → s2 (fill width) → pane (grow down)
+  // → reveal (light sweep) → open (content).
+  const gsWrap = document.getElementById('gs-wrap')
+  const gsEmerald = document.getElementById('gs-emerald')
+  let gsStage = 'idle'
+
+  function openPane() {
+    if (gsStage !== 'idle') return
+    gsStage = 's1'
+    gsWrap.classList.remove('idle')
+    gsWrap.classList.add('s1')   // disc morphs to pill height
+  }
+
+  // Emerald layer finishes each morph → advance the stage.
+  gsEmerald.addEventListener('transitionend', (e) => {
+    if (gsStage === 's1' && e.propertyName === 'height') {
+      gsStage = 's2'
+      gsWrap.classList.add('s2') // emerald fills pill width
+    } else if (gsStage === 's2' && e.propertyName === 'width') {
+      gsStage = 'pane'
+      gsWrap.classList.add('pane') // wrap grows down into the pane
+    }
+  })
+
+  // The wrap finishes a height transition:
+  //  - after growing into the pane → sweep the light
+  //  - after collapsing to 0 → reveal the settings
+  gsWrap.addEventListener('transitionend', (e) => {
+    if (e.target !== gsWrap || e.propertyName !== 'height') return
+    if (gsStage === 'pane') {
+      gsStage = 'reveal'
+      gsWrap.classList.add('reveal')
+    } else if (gsStage === 'collapsing') {
+      gsStage = 'closed'
+      finishOnboarding()
+    }
+  })
+
+  // Light animation ends: sweep (→ open content) or flash (→ collapse).
+  document.getElementById('gs-light').addEventListener('animationend', () => {
+    if (gsStage === 'reveal') {
+      gsStage = 'open'
+      gsWrap.classList.add('open')
+    } else if (gsStage === 'closing') {
+      gsStage = 'collapsing'
+      gsWrap.classList.add('collapsing')  // height → 0, bottom-up
+    }
+  })
+
+  // Continue → closing sequence: flash clears content, then collapse to 0.
+  function closePane() {
+    if (gsStage !== 'open') return
+    gsStage = 'closing'
+    gsWrap.classList.remove('open', 'reveal')
+    gsWrap.classList.add('closing')
+  }
+
+  // Pane gone → reveal the settings on the same page.
+  function finishOnboarding() {
+    document.getElementById('gs-pill-holder').style.display = 'none'
+    document.getElementById('gs-settings').classList.remove('hidden')
+    requestAnimationFrame(() =>
+      document.getElementById('gs-settings').classList.add('gs-settings-in')
+    )
+  }
+
+  // Dev aid: jump straight to the settled settings state (skip the animation).
+  function skipToSettings() {
+    gsStage = 'closed'
+    document.getElementById('gs-pill-holder').style.display = 'none'
+    document.getElementById('gs-settings').classList.remove('hidden')
+    document.getElementById('gs-settings').classList.add('gs-settings-in')
+  }
+
+  function toggleSwitch(btn) {
+    const on = btn.getAttribute('aria-checked') === 'true'
+    btn.setAttribute('aria-checked', String(!on))
+    btn.classList.toggle('on', !on)
+  }
+
+  // Slide the Claude field open/closed with the web-automation toggle.
+  function syncClaude() {
+    const on = document.getElementById('web-auto-switch').getAttribute('aria-checked') === 'true'
+    document.getElementById('claude-row').classList.toggle('collapsed', !on)
+  }
+  syncClaude()  // set initial state (no transition on first paint)
+
+  // ---- Blocking modal: API errors + microphone problems ----
+  // One card, config-driven per reason. Each reason picks an icon, copy, and
+  // one of three actions (external link / fix-key / retry-mic).
+  const PROVIDER_LABEL = { gemini: 'Gemini', claude: 'Claude' }
+  const BILLING_URL = {
+    gemini: 'https://aistudio.google.com/apikey',
+    claude: 'https://console.anthropic.com/settings/billing',
+  }
+  const KEY_ROW_ID = { gemini: 'gemini-row', claude: 'claude-row' }
+  const KEY_NOTE = 'Your key stays in this browser and is only sent to make your own API calls.'
+
+  let cmFixProvider = null  // remembered for goFixKey()
+
+  // reason → config. `p` = provider name (Gemini/Claude) where relevant.
+  const MODAL_CONFIG = {
+    credits: (p) => ({
+      icon: 'credits',
+      title: `${p} credits used up`,
+      body: `Your ${p} API key is out of credits, so Compass can't make calls with it right now. Top up to continue.`,
+      action: 'link',
+      actionLabel: `Add ${p} credits`,
+      href: null, // set per-provider below
+      note: "Your key stays in this browser. We can't see your balance — this is just what the API returned.",
+    }),
+    invalid_key: (p) => ({
+      icon: 'key',
+      title: `${p} key isn't valid`,
+      body: `${p} rejected this API key. Double-check you pasted it correctly, or replace it below.`,
+      action: 'fixkey',
+      actionLabel: `Update ${p} key`,
+      note: KEY_NOTE,
+    }),
+    mic_denied: () => ({
+      icon: 'mic-off',
+      title: 'Microphone is blocked',
+      body: "Compass listens through your microphone, but the browser is blocking access. Click the microphone icon in the address bar to allow it, then try again.",
+      action: 'retry',
+      actionLabel: 'Try again',
+      note: 'Audio is streamed only while a session is active. Nothing is recorded.',
+    }),
+    mic_missing: () => ({
+      icon: 'mic',
+      title: 'No microphone found',
+      body: "Compass couldn't find a microphone. Plug one in or check your system sound settings, then try again.",
+      action: 'retry',
+      actionLabel: 'Try again',
+      note: 'Audio is streamed only while a session is active. Nothing is recorded.',
+    }),
+  }
+
+  const CM_ICONS = ['credits', 'key', 'mic-off', 'mic']
+  const CM_ACTIONS = { link: 'cm-action-link', fixkey: 'cm-action-btn', retry: 'cm-action-retry' }
+
+  function showModal(reason, provider) {
+    const build = MODAL_CONFIG[reason]
+    if (!build) return
+    cmFixProvider = provider || null
+    const cfg = build(PROVIDER_LABEL[provider])
+
+    // icon: show the one this reason wants, hide the rest
+    CM_ICONS.forEach((id) => {
+      document.getElementById('cm-icon-' + id).style.display = id === cfg.icon ? '' : 'none'
+    })
+
+    document.getElementById('cm-title').textContent = cfg.title
+    document.getElementById('cm-body').textContent = cfg.body
+    document.getElementById('cm-note').textContent = cfg.note
+
+    // action: show the one this reason wants, hide the rest
+    Object.entries(CM_ACTIONS).forEach(([kind, elId]) => {
+      document.getElementById(elId).style.display = kind === cfg.action ? '' : 'none'
+    })
+    if (cfg.action === 'link') {
+      document.getElementById('cm-action-link-label').textContent = cfg.actionLabel
+      document.getElementById('cm-action-link').href = BILLING_URL[provider]
+    } else if (cfg.action === 'fixkey') {
+      document.getElementById('cm-action-btn-label').textContent = cfg.actionLabel
+    } else {
+      document.getElementById('cm-action-retry-label').textContent = cfg.actionLabel
+    }
+
+    document.getElementById('credits-modal').classList.add('open')
+  }
+
+  // thin wrappers per case
+  function showCreditsModal(provider) { showModal('credits', provider) }
+  function showInvalidKeyModal(provider) { showModal('invalid_key', provider) }
+  function showMicModal(kind) { showModal(kind === 'missing' ? 'mic_missing' : 'mic_denied') }
+
+  // invalid-key action: close, make sure settings is showing, jump to the row
+  function goFixKey() {
+    hideCreditsModal()
+    if (gsStage !== 'closed') skipToSettings()
+    const row = document.getElementById(KEY_ROW_ID[cmFixProvider])
+    if (!row) return
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const input = row.querySelector('input')
+    if (input) input.focus()
+  }
+
+  // mic action: re-request the mic. In the real extension this calls
+  // getUserMedia again and closes on success / re-shows on failure.
+  function retryMic() {
+    hideCreditsModal()
+    // preview stub — real impl: navigator.mediaDevices.getUserMedia({ audio: true })
+  }
+
+  function hideCreditsModal() {
+    document.getElementById('credits-modal').classList.remove('open')
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideCreditsModal()
+  })
+</script>
+
+</body>
+</html>

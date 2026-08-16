@@ -2,6 +2,634 @@
 @tailwind components;
 @tailwind utilities;
 
+@font-face {
+  font-family: "Orbitron";
+  src: url("./fonts/Orbitron.ttf") format("truetype-variations");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Excessive";
+  src:
+    url("./fonts/Excessive-ExtraCondensed.woff2") format("woff2"),
+    url("./fonts/Excessive-ExtraCondensed.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Full-page documents (the side panel). Shadow-DOM-isolated content scripts
+   like the pill don't inherit this, so the host page is unaffected. */
+@layer base {
+  html {
+    background: #0a0a0a;
+    color-scheme: dark;
+  }
+  body {
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* Reusable green glass — the shared Compass accent surface. */
+.glass-emerald {
+  background: linear-gradient(
+    135deg,
+    hsla(161, 65%, 20%, 0.6) 0%,
+    hsla(161, 65%, 30%, 0.4) 40%,
+    hsla(161, 65%, 40%, 0.5) 60%,
+    hsla(161, 65%, 15%, 0.6) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
+    inset 0 -1px 0 hsla(161, 65%, 10%, 0.4),
+    0 4px 16px hsla(161, 65%, 30%, 0.4);
+}
+
+/* Reusable grainy near-neutral glass — the frosted body surface (modal card,
+   pill body). feTurbulence grain on ::before, lit rim + thickness ring. */
+.glass-neutral {
+  position: relative;
+  isolation: isolate;
+  background:
+    linear-gradient(
+      180deg,
+      hsla(160, 22%, 90%, 0.16) 0%,
+      hsla(160, 18%, 70%, 0.04) 55%,
+      hsla(160, 20%, 40%, 0.1) 100%
+    ),
+    linear-gradient(
+      135deg,
+      hsla(160, 25%, 85%, 0.24) 0%,
+      hsla(160, 20%, 88%, 0.16) 45%,
+      hsla(160, 25%, 84%, 0.26) 60%,
+      hsla(160, 20%, 78%, 0.2) 100%
+    );
+  -webkit-backdrop-filter: blur(9px) saturate(1.25);
+  backdrop-filter: blur(9px) saturate(1.25);
+  box-shadow:
+    inset 0 1.5px 0.5px hsla(0, 0%, 100%, 0.6),
+    inset 0 0 0 1px hsla(0, 0%, 100%, 0.12),
+    inset 0 -2px 2px hsla(160, 30%, 8%, 0.4),
+    0 6px 20px hsla(0, 0%, 0%, 0.4);
+}
+.glass-neutral::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: -1;
+  opacity: 0.5;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Error modal: fade the scrim in on open (needs @starting-style so the
+   display:none → flex flip can animate). Card scales up with a soft spring. */
+.error-modal {
+  opacity: 0;
+  transition:
+    opacity 220ms ease,
+    display 220ms allow-discrete;
+}
+.error-modal.open {
+  opacity: 1;
+}
+@starting-style {
+  .error-modal.open {
+    opacity: 0;
+  }
+}
+.error-modal-card {
+  transform: scale(0.94);
+  transition: transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.error-modal.open .error-modal-card {
+  transform: scale(1);
+}
+/* Softer card on the scrim: the shared .glass-neutral reads as a slab over the
+   dim backdrop, so thin the fill + grain here. */
+.error-modal-card.glass-neutral {
+  background:
+    linear-gradient(180deg, hsla(160, 22%, 90%, 0.08) 0%, hsla(160, 18%, 70%, 0.02) 55%, hsla(160, 20%, 40%, 0.05) 100%),
+    linear-gradient(135deg, hsla(160, 25%, 85%, 0.1) 0%, hsla(160, 20%, 88%, 0.06) 45%, hsla(160, 25%, 84%, 0.11) 60%, hsla(160, 20%, 78%, 0.08) 100%);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+}
+.error-modal-card.glass-neutral::before {
+  opacity: 0.28;
+}
+/* Emerald action button in the modal: keep glassy inset rims, drop the outer
+   colored bloom that reads as a glow. */
+.error-modal-action.glass-emerald {
+  box-shadow:
+    inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
+    inset 0 -1px 0 hsla(161, 65%, 10%, 0.4);
+}
+
+/* =============================================
+   ONBOARDING — Get-started pill → pane morph
+   Class-driven stage machine (stage state toggles .s1/.s2/.pane/.reveal/.open/
+   .closing/.collapsing on #gs-wrap). Width grows first, then height; a FIXED
+   1.75rem radius everywhere so no stage passes through a full circle.
+   ============================================= */
+.gs-wrap {
+  position: relative;
+  width: 20rem;
+  height: 3.5rem;
+  border-radius: 1.75rem;
+  overflow: hidden;
+  cursor: pointer;
+  transform-origin: top center; /* collapse shrinks from the bottom up */
+  transition: height 380ms ease-out;
+}
+.gs-wrap.pane {
+  height: 13rem;
+  cursor: default;
+}
+
+.gs-emerald {
+  position: absolute;
+  left: 0.375rem;
+  top: 0.375rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 1.75rem;
+  background:
+    linear-gradient(
+      135deg,
+      hsla(161, 65%, 20%, 0.6) 0%,
+      hsla(161, 65%, 30%, 0.4) 40%,
+      hsla(161, 65%, 40%, 0.5) 60%,
+      hsla(161, 65%, 15%, 0.6) 100%
+    ),
+    #0c1512;
+  transition:
+    width 300ms ease-out,
+    height 280ms ease-out,
+    left 300ms ease-out,
+    top 280ms ease-out;
+}
+.gs-wrap.s1 .gs-emerald,
+.gs-wrap.s2 .gs-emerald,
+.gs-wrap.pane .gs-emerald {
+  top: 0;
+  height: 100%;
+}
+.gs-wrap.s2 .gs-emerald,
+.gs-wrap.pane .gs-emerald {
+  left: 0;
+  width: 100%;
+}
+
+.gs-icon {
+  position: absolute;
+  /* The compass artwork isn't centred within its own viewBox (its visual centre
+     is ~52.2%/49.3%, not 50%/50%), so with place-items:center the glyph looks
+     off. Nudge the whole box (not the SVG — that carries the spin transform) so
+     the drawing sits optically centred in the disc. */
+  left: 0.315rem;
+  top: 0.395rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  display: grid;
+  place-items: center;
+  z-index: 3;
+  transition: opacity 260ms ease;
+}
+.gs-wrap.pane .gs-icon {
+  opacity: 0;
+}
+
+.gs-label {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  white-space: nowrap;
+  transition: opacity 200ms ease;
+}
+.gs-wrap:not(.idle) .gs-label {
+  opacity: 0;
+}
+
+.gs-content {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1.5rem 1.25rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 300ms ease;
+}
+.gs-wrap.open .gs-content {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.gs-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  height: 2.6rem;
+  padding: 0 0.85rem;
+  border-radius: 0.7rem;
+  background: hsla(0, 0%, 0%, 0.22);
+  border: 1px solid hsla(0, 0%, 100%, 0.14);
+  box-shadow: inset 0 1px 0 hsla(0, 0%, 100%, 0.06);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+.gs-field:focus-within {
+  border-color: hsla(0, 0%, 100%, 0.4);
+  box-shadow: inset 0 1px 0 hsla(0, 0%, 100%, 0.08);
+}
+.gs-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: hsla(0, 0%, 100%, 0.95);
+  font-size: 13px;
+}
+.gs-input::placeholder {
+  color: hsla(0, 0%, 100%, 0.4);
+}
+
+.gs-continue {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  height: 2.7rem;
+  border-radius: 9999px;
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: hsla(0, 0%, 100%, 0.95);
+  transition:
+    transform 120ms ease,
+    filter 160ms ease;
+}
+.gs-continue > * {
+  position: relative;
+  z-index: 1;
+}
+.gs-continue:hover {
+  filter: brightness(1.12);
+}
+.gs-continue:active {
+  transform: scale(0.98);
+}
+.gs-continue.glass-neutral {
+  box-shadow:
+    inset 0 1.5px 0.5px hsla(0, 0%, 100%, 0.6),
+    inset 0 0 0 1px hsla(0, 0%, 100%, 0.12),
+    inset 0 -2px 2px hsla(160, 30%, 8%, 0.4);
+}
+
+.gs-light {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 40%;
+  z-index: 5;
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    hsla(161, 45%, 88%, 0.1) 40%,
+    hsla(161, 40%, 92%, 0.3) 50%,
+    hsla(161, 45%, 88%, 0.1) 60%,
+    transparent 100%
+  );
+  transform: translateY(-100%);
+}
+.gs-wrap.reveal .gs-light {
+  opacity: 1;
+  animation: gs-sweep 620ms ease-out forwards;
+}
+@keyframes gs-sweep {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(250%);
+  }
+}
+.gs-wrap.closing .gs-content {
+  opacity: 0;
+  transition: opacity 420ms ease;
+}
+.gs-wrap.closing .gs-light {
+  opacity: 1;
+  animation: gs-sweep-close 520ms ease-in forwards;
+}
+@keyframes gs-sweep-close {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(250%);
+  }
+}
+.gs-wrap.collapsing {
+  height: 0 !important;
+  transition: height 360ms ease-in;
+}
+
+/* settings reveal on the same page after the pane closes */
+.gs-settings {
+  opacity: 0;
+  transform: translateY(8px);
+  transition:
+    opacity 320ms ease,
+    transform 320ms ease;
+}
+.gs-settings.gs-settings-in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── Minimal settings (hairline sections, no cards) ── */
+.st-section {
+  padding: 1.25rem 0;
+  border-top: 1px solid hsla(0, 0%, 100%, 0.08);
+}
+.st-section:first-of-type {
+  border-top: none;
+}
+.st-eyebrow {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: hsla(0, 0%, 100%, 0.32);
+  margin-bottom: 1rem;
+}
+.st-row {
+  margin-bottom: 1rem;
+}
+.st-row:last-child {
+  margin-bottom: 0;
+}
+/* Claude row slides open/closed via max-height (can't transition height:auto). */
+.st-collapsible {
+  overflow: hidden;
+  max-height: 5rem;
+  opacity: 1;
+  transition:
+    max-height 320ms ease,
+    opacity 260ms ease,
+    margin-bottom 320ms ease;
+}
+.st-collapsible.collapsed {
+  max-height: 0;
+  opacity: 0;
+  margin-bottom: 0;
+  pointer-events: none;
+}
+.st-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+}
+.st-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: hsla(0, 0%, 100%, 0.92);
+}
+.st-beta {
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: hsl(161, 60%, 60%);
+  vertical-align: middle;
+  margin-left: 0.35rem;
+  padding: 1px 5px;
+  border: 1px solid hsla(161, 60%, 55%, 0.35);
+  border-radius: 999px;
+}
+.st-link {
+  font-size: 11px;
+  color: hsl(161, 60%, 55%);
+  text-decoration: none;
+}
+.st-link:hover {
+  text-decoration: underline;
+}
+.st-input {
+  width: 100%;
+  height: 2.35rem;
+  padding: 0 0.75rem;
+  font-size: 13px;
+  color: hsla(0, 0%, 100%, 0.95);
+  background: hsla(0, 0%, 100%, 0.05);
+  border: 1px solid hsla(0, 0%, 100%, 0.12);
+  border-radius: 0.6rem;
+  outline: none;
+  transition: border-color 150ms ease;
+}
+.st-input::placeholder {
+  color: hsla(0, 0%, 100%, 0.3);
+}
+.st-input:focus {
+  border-color: hsl(161, 55%, 50%);
+}
+.st-masked {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.st-masked > span {
+  flex: 1;
+  height: 2.35rem;
+  display: flex;
+  align-items: center;
+  padding: 0 0.75rem;
+  font-size: 13px;
+  color: hsla(0, 0%, 100%, 0.6);
+  background: hsla(0, 0%, 100%, 0.03);
+  border: 1px solid hsla(0, 0%, 100%, 0.08);
+  border-radius: 0.6rem;
+}
+.st-trash {
+  height: 2.35rem;
+  width: 2.35rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid hsla(0, 0%, 100%, 0.1);
+  border-radius: 0.6rem;
+  background: transparent;
+  color: hsla(0, 0%, 100%, 0.45);
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+.st-trash svg {
+  width: 1rem;
+  height: 1rem;
+}
+.st-trash:hover {
+  color: hsla(0, 0%, 100%, 0.85);
+  border-color: hsla(0, 0%, 100%, 0.2);
+  background: hsla(0, 0%, 100%, 0.06);
+}
+.st-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.st-toggle-row:last-child {
+  margin-bottom: 0;
+}
+.st-toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.st-hint {
+  font-size: 11px;
+  line-height: 1.35;
+  color: hsla(0, 0%, 100%, 0.5);
+  max-width: 15rem;
+}
+.st-switch {
+  position: relative;
+  flex: none;
+  width: 2.6rem;
+  height: 1.5rem;
+  border-radius: 9999px;
+  border: 1px solid hsla(0, 0%, 100%, 0.15);
+  background: hsla(0, 0%, 100%, 0.06);
+  cursor: pointer;
+  transition:
+    background 200ms ease,
+    border-color 200ms ease;
+}
+.st-switch::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  transform: translateY(-50%);
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 50%;
+  background: hsl(0, 0%, 80%);
+  transition:
+    transform 200ms cubic-bezier(0.3, 1.4, 0.5, 1),
+    background 200ms ease;
+}
+.st-switch.on {
+  background: linear-gradient(
+    135deg,
+    hsla(161, 65%, 20%, 0.6) 0%,
+    hsla(161, 65%, 30%, 0.4) 40%,
+    hsla(161, 65%, 40%, 0.5) 60%,
+    hsla(161, 65%, 15%, 0.6) 100%
+  );
+  border-color: hsla(161, 65%, 45%, 0.55);
+  box-shadow:
+    inset 0 1px 0 hsla(0, 0%, 100%, 0.2),
+    inset 0 -1px 0 hsla(161, 65%, 10%, 0.4),
+    0 4px 16px hsla(161, 65%, 30%, 0.4);
+}
+.st-switch.on::after {
+  transform: translate(1.1rem, -50%);
+  background: #fff;
+}
+.st-github {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+  font-size: 12px;
+  color: hsla(0, 0%, 100%, 0.45);
+  text-decoration: none;
+  transition: color 150ms ease;
+}
+.st-github svg {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+}
+.st-github:hover {
+  color: hsla(0, 0%, 100%, 0.85);
+}
+.st-foot {
+  margin-top: 1.25rem;
+  font-size: 11px;
+  line-height: 1.5;
+  color: hsla(0, 0%, 100%, 0.3);
+}
+
+/* COMPASS wordmark — glossy emerald text with a slow travelling glint. */
+.glass-text {
+  background:
+    linear-gradient(
+      145deg,
+      transparent 30%,
+      hsla(161, 45%, 85%, 0) 42%,
+      hsla(161, 45%, 88%, 0.35) 50%,
+      hsla(161, 45%, 85%, 0) 58%,
+      transparent 70%
+    ),
+    linear-gradient(
+      145deg,
+      hsla(158, 80%, 14%, 0.75) 0%,
+      hsla(158, 75%, 26%, 0.6) 38%,
+      hsla(159, 70%, 40%, 0.68) 52%,
+      hsla(158, 75%, 24%, 0.62) 66%,
+      hsla(158, 82%, 12%, 0.78) 100%
+    );
+  background-size:
+    320% 100%,
+    100% 100%;
+  background-position:
+    250% 0,
+    0 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: glass-text-shine 20s linear infinite;
+}
+@keyframes glass-text-shine {
+  0% {
+    background-position:
+      250% 0,
+      0 0;
+  }
+  45% {
+    background-position:
+      -150% 0,
+      0 0;
+  }
+  100% {
+    background-position:
+      -150% 0,
+      0 0;
+  }
+}
+
 /* =============================================
    BUTTON DEFAULT STATE
    Base layout in Tailwind: relative flex items-center px-4 py-1 cursor-pointer bg-transparent border-none rounded-full origin-center
@@ -12,7 +640,9 @@
   --border_radius: 9999px;
 }
 
-/* dark pill background always visible */
+/* default pill background — grainy neutral frosted glass. The noise data-URI is
+   the top background layer (overlay-blended for surface texture), over a
+   vertical falloff and the warm greenish-grey body. */
 .button::before {
   content: "";
   position: absolute;
@@ -22,11 +652,32 @@
 
   width: 100%;
   height: 100%;
-  background: var(--black-700);
+
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E"),
+    linear-gradient(
+      180deg,
+      hsla(160, 22%, 90%, 0.16) 0%,
+      hsla(160, 18%, 70%, 0.04) 55%,
+      hsla(160, 20%, 40%, 0.10) 100%
+    ),
+    linear-gradient(
+      135deg,
+      hsla(160, 25%, 85%, 0.24) 0%,
+      hsla(160, 20%, 88%, 0.16) 45%,
+      hsla(160, 25%, 84%, 0.26) 60%,
+      hsla(160, 20%, 78%, 0.20) 100%
+    );
+  background-blend-mode: overlay, normal, normal;
+  -webkit-backdrop-filter: blur(9px) saturate(1.25);
+  backdrop-filter: blur(9px) saturate(1.25);
 
   border-radius: var(--border_radius);
-  box-shadow: inset 0 0.5px hsl(0, 0%, 81%), inset 0 -1px 2px 0 hsl(0, 0%, 0%),
-    0px 4px 10px -4px hsla(0 0% 0% / 1);
+  box-shadow:
+    inset 0 1.5px 0.5px hsla(0, 0%, 100%, 0.6),
+    inset 0 0 0 1px hsla(0, 0%, 100%, 0.12),
+    inset 0 -2px 2px hsla(160, 30%, 8%, 0.4),
+    0 6px 20px hsla(0, 0%, 0%, 0.4);
 
   transition: opacity 0.3s ease-in-out;
   z-index: 0;

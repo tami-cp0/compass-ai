@@ -3,7 +3,7 @@
   "displayName": "Compass AI",
   "version": "0.1.0",
   "private": true,
-  "description": "A voice copilot for Atlass Portfolios: ask, get answers and let it act on the page for you.",
+  "description": "A voice copilot for the stock market: ask, get answers and let it act on the page for you.",
   "author": "Oluwatamilore Olugbesan <findtamilore@gmail.com>",
   "scripts": {
     "dev": "plasmo dev",
@@ -42,7 +42,9 @@
       "tabs",
       "activeTab",
       "debugger",
-      "scripting"
+      "scripting",
+      "storage",
+      "sidePanel"
     ],
     "action": {}
   }
