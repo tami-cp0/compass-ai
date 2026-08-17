@@ -43,6 +43,12 @@ export type ServerMessage =
       reason: string
       kind?: "credits" | "invalid_key" | "missing_key" | "other"
       provider?: "gemini" | "claude"
+      // Whether this error ends the live session. true → pill drops to
+      // non-active (bad key at connect, reconnect exhaustion). false → a
+      // background task (research/automation) failed but the live voice session
+      // is still running; show the popup/badge without tearing the pill down.
+      // Defaults to true when absent (fail safe: end the session).
+      fatal?: boolean
     }
   | { type: "screenshot_request"; sessionId: string; requestId: string }
   | { type: "page_data_request"; sessionId: string; requestId: string; box: Box; physicalPixels: boolean }

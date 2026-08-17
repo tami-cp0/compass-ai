@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react"
 
 import { CompassIcon } from "~contents/components/compass-icon"
 import { ErrorModal } from "~contents/components/error-modal"
+import { PANEL_OPEN_KEY } from "~contents/hooks/use-session"
 import { useSessionError } from "~contents/hooks/use-session-error"
 import {
   getCredentials,
@@ -450,6 +451,24 @@ function SidePanel() {
     getCredentials().then(setCreds)
   }, [])
 
+  // Flag the panel as open while mounted so the pill suppresses its "click me"
+  // badge (no point nudging to open what's already open). Cleared on unmount and
+  // when the panel is hidden. storage.session is per-browser-run, in-memory.
+  useEffect(() => {
+    const setOpen = (open: boolean) => {
+      if (open) chrome.storage.session.set({ [PANEL_OPEN_KEY]: true })
+      else chrome.storage.session.remove(PANEL_OPEN_KEY)
+    }
+    setOpen(true)
+    const onVisibility = () => setOpen(document.visibilityState === "visible")
+    document.addEventListener("visibilitychange", onVisibility)
+    window.addEventListener("pagehide", () => setOpen(false))
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility)
+      setOpen(false)
+    }
+  }, [])
+
   // Esc dismisses the error modal.
   useEffect(() => {
     if (!error) return
@@ -499,26 +518,30 @@ function SidePanel() {
 
   // The giant COMPASS wordmark is a persistent header across BOTH views; only
   // the content below it swaps between onboarding and settings.
+  // Scroll on the full-width outer element so the thin scrollbar hugs the true
+  // panel edge, not the centered 400px column. Content stays capped at 400px.
   return (
-    <div className="relative overflow-y-auto w-full max-w-[400px] mx-auto h-screen flex flex-col bg-neutral-950 text-white/90">
-      <p className="glass-text font-excessive text-[23rem] leading-[0.85] shrink-0 overflow-hidden tracking-[-0.4rem] mt-5 text-center">
-        COMPASS
-      </p>
+    <div className="cmp-scroll relative h-screen overflow-y-auto bg-neutral-950 text-white/90">
+      <div className="mx-auto flex min-h-full w-full max-w-[400px] flex-col">
+        <p className="glass-text font-excessive text-[23rem] leading-[0.85] shrink-0 overflow-hidden tracking-[-0.4rem] mt-5 text-center">
+          COMPASS
+        </p>
 
-      {signedUp ? (
-        <>
-          <Settings
-            creds={creds}
-            update={update}
-            geminiInputRef={geminiInputRef}
-            claudeInputRef={claudeInputRef}
-          />
-          {modal}
-        </>
-      ) : (
-        // Onboarding: no error popup here — there's no key to fix yet.
-        <Onboarding onDone={(email) => update({ email })} />
-      )}
+        {signedUp ? (
+          <>
+            <Settings
+              creds={creds}
+              update={update}
+              geminiInputRef={geminiInputRef}
+              claudeInputRef={claudeInputRef}
+            />
+            {modal}
+          </>
+        ) : (
+          // Onboarding: no error popup here — there's no key to fix yet.
+          <Onboarding onDone={(email) => update({ email })} />
+        )}
+      </div>
     </div>
   )
 }

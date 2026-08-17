@@ -25,7 +25,7 @@ const SLOW_TO_RECONNECTING_MS = 5_000
 const OFFLINE_FLASH_MS        = 5_000
 
 const Pill = () => {
-  const { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, errorPending, pillEnabled, toggle } = useSession()
+  const { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, errorPending, panelOpen, pillEnabled, toggle } = useSession()
   const [showActive, setShowActive] = useState(false)
   const [degradedAged, setDegradedAged] = useState(false)
   const [offlineFlash, setOfflineFlash] = useState(false)
@@ -78,9 +78,10 @@ const Pill = () => {
     toggle()
   }
 
-  // "Click me" error affordance: a stashed error the panel hasn't shown, while
-  // the pill is idle (not mid-session, not offline).
-  const showErrorBadge = errorPending && !wantSession && view.pillState !== "offline"
+  // "Click me" error affordance: a stashed error the panel hasn't shown yet.
+  // Suppressed while the side panel is already open (nothing to nudge) or when
+  // offline. Clicking opens the panel to the stashed popup.
+  const showErrorBadge = errorPending && !panelOpen && view.pillState !== "offline"
 
   const classes = [
     "button relative flex items-center justify-center h-10 px-4 py-1 cursor-pointer bg-transparent rounded-full overflow-hidden origin-center transition-[width] duration-300 ease-in-out",
@@ -98,7 +99,17 @@ const Pill = () => {
         }}
         aria-label={wantSession ? "Stop session" : "Start session"}
       >
-        {view.showBarsLayout ? (
+        {showErrorBadge ? (
+          // Error takes precedence over the normal layout in both idle and
+          // active states — the compass glyph + a "click me" prompt.
+          <div className="flex items-center">
+            <div className="h-10 w-7 shrink-0" />
+            <CompassIcon className="size-10 absolute left-0 z-10" />
+            <span className="text_button relative z-10 whitespace-nowrap">
+              action needed, click me
+            </span>
+          </div>
+        ) : view.showBarsLayout ? (
           <div className="flex items-center gap-2 fade-in">
             {view.isReconnecting ? (
               <ReconnectingIcon className="size-6 spin-slow" />
@@ -117,11 +128,7 @@ const Pill = () => {
             <div className="h-10 w-7 shrink-0" />
             <CompassIcon className="size-10 absolute left-0 z-10" />
             <span className="text_button relative z-10 whitespace-nowrap">
-              {view.pillState === "offline"
-                ? "you are offline"
-                : showErrorBadge
-                  ? "action needed, click me"
-                  : "Compass"}
+              {view.pillState === "offline" ? "you are offline" : "Compass"}
             </span>
           </div>
         )}

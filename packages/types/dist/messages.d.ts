@@ -73,6 +73,7 @@ export type ServerMessage = {
     reason: string;
     kind?: "credits" | "invalid_key" | "missing_key" | "other";
     provider?: "gemini" | "claude";
+    fatal?: boolean;
 } | {
     type: "screenshot_request";
     sessionId: string;

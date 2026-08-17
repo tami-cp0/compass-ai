@@ -12,6 +12,10 @@ type OutboundExtensionMessage = StripSessionId<ExtensionMessage>
 
 export type ConnectionStatus = "ok" | "degraded" | "disconnected"
 
+// storage.session flag the side panel sets while it's mounted, so the pill can
+// suppress the "click me" badge when the panel is already open.
+export const PANEL_OPEN_KEY = "compass:panelOpen"
+
 export interface ResearchTask {
   taskId: string
   name:   string
@@ -35,6 +39,8 @@ export interface UseSession {
   // True while an error popup is stashed but the panel hasn't shown it yet. The
   // pill renders a "click me" badge; clicking opens the panel (a user gesture).
   errorPending:        boolean
+  // True while the side panel is open — suppresses the pill's error badge.
+  panelOpen:           boolean
   pillEnabled:         boolean
   toggle:              () => void
 }
@@ -53,6 +59,7 @@ export function useSession(): UseSession {
   const [sessionError,        setSessionError]        = useState<string | null>(null)
   const [errorPending,        setErrorPending]        = useState(false)
   const [pillEnabled,         setPillEnabled]         = useState(true)
+  const [panelOpen,           setPanelOpen]           = useState(false)
   const captureRef = useRef<PcmCapture | null>(null)
   // Holds the latest teardownCapture so the mount-time message listener (which
   // closes over nothing) can tear down capture on a session_error.
@@ -61,6 +68,24 @@ export function useSession(): UseSession {
   // synchronously (within the user gesture) whether setup is incomplete — needed
   // because chrome.sidePanel.open() must run inside the gesture, before awaits.
   const credsRef = useRef<Credentials | null>(null)
+
+  // Track whether the side panel is open (it writes PANEL_OPEN_KEY to
+  // storage.session while mounted). Used to suppress the pill's "click me" badge
+  // when the panel is already showing.
+  useEffect(() => {
+    chrome.storage.session
+      .get(PANEL_OPEN_KEY)
+      .then((s) => setPanelOpen(!!s[PANEL_OPEN_KEY]))
+    const onChanged = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      area: string
+    ) => {
+      if (area !== "session" || !changes[PANEL_OPEN_KEY]) return
+      setPanelOpen(!!changes[PANEL_OPEN_KEY].newValue)
+    }
+    chrome.storage.onChanged.addListener(onChanged)
+    return () => chrome.storage.onChanged.removeListener(onChanged)
+  }, [])
 
   // Keep the pill's error badge in sync with the stashed error: present → badge
   // on, removed (panel dismissed it) → badge off. Covers errors stashed by the
@@ -133,16 +158,20 @@ export function useSession(): UseSession {
         return false
       }
       if (msg.type === "session_error") {
-        // Server refused/killed the session (bad key, out of credits, etc). Drop
-        // the session and raise the "click me" error badge on the pill: the SW
-        // can't auto-open the side panel for a server-pushed error (no user
-        // gesture), so the pill click is how the user opens the panel to see the
-        // stashed popup.
+        // Any provider error ends the session — once it fires (e.g. Gemini out
+        // of credits mid-research) the live model stops responding anyway. Send
+        // session_end so the server closes the Gemini Live session and drops its
+        // resumption handle (otherwise research/automation errors, which leave
+        // the live session running, would orphan it and a later reconnect could
+        // try to resume a dead session). Then tear down local capture. Raise the
+        // "click me" badge so the user can open the panel to the stashed popup
+        // (the SW can't auto-open it — no user gesture on a server-pushed error).
         setSessionError(msg.reason)
         setErrorPending(true)
         setWantSession(false)
         setResearchTasks([])
         setIsVisionOn(false)
+        chrome.runtime.sendMessage({ type: "session_end" })
         teardownCaptureRef.current?.()
         return false
       }
@@ -376,5 +405,5 @@ export function useSession(): UseSession {
     }
   }, [isOffline, wantSession, teardownCapture, startSession])
 
-  return { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, sessionError, errorPending, pillEnabled, toggle }
+  return { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, sessionError, errorPending, panelOpen, pillEnabled, toggle }
 }

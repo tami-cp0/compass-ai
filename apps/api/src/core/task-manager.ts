@@ -226,6 +226,9 @@ export class TaskManager {
 						reason: classified.reason,
 						kind: classified.kind,
 						provider: 'gemini',
+						// Research failing doesn't kill the live voice session — show the
+						// popup/badge but leave the pill active.
+						fatal: false,
 					});
 				}
 				this.gemini.injectContent(
@@ -487,6 +490,8 @@ export class TaskManager {
 					reason: classified.reason,
 					kind: classified.kind,
 					provider: 'claude',
+					// Automation failing leaves the live voice session running.
+					fatal: false,
 				});
 			}
 			const progressLog = memory.renderProgressLog();
