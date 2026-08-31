@@ -49,6 +49,7 @@ src/
 - **Concurrency limits.** `TaskManager` enforces ≤2 research jobs and ≤1 automation per session. Research runs through a single grounded-prose agent whose depth scales with the query (a line for a plain fact, paragraphs for a causal question), so a quick lookup and a deep analysis share the same two slots. New requests beyond the limit are rejected with a structured error that Gemini relays to the user.
 - **Origin allowlist.** In production, `ALLOWED_ORIGINS` is enforced on the WS upgrade; in development it is ignored so unpacked extensions on any chrome-extension://... id can connect.
 - **Stateless across restarts.** Session state (metadata, conversation history, resumption handles) lives in-process and does not survive an API restart by design; the extension re-handshakes and starts fresh.
+- **Optional email store.** On session start the user's email is recorded to a Neon Postgres table (`recordEmail`). It is best-effort: with no `DATABASE_URL` the store is skipped and the server runs normally.
 
 ---
 

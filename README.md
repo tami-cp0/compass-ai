@@ -1,16 +1,48 @@
-# Compass AI
+<h1 align="center">Compass AI</h1>
 
-A voice copilot for the stock market. The user speaks to an AI assistant that can automate the page on their behalf and research stocks in real time, without the assistant ever going silent.
+<p align="center">
+  <strong>A voice copilot for the stock market.</strong><br />
+  Talk to it. It watches your screen, researches stocks in real time, and drives the page for you — without ever going silent.
+</p>
 
-> **License:** MIT. Contributions are accepted under the same license — see [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).
+<p align="center">
+  <img src="image.png" alt="Compass AI running live on a stock chart, with the voice pill in the page and the side panel open" width="100%" />
+</p>
+
+<p align="center">
+  <em>The floating pill sits on any brokerage or charting site; the side panel holds your keys and controls. You speak, Compass answers in a real voice — and can act on the page while it talks.</em>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-1f9d76.svg" /></a>
+  <img alt="Chrome MV3" src="https://img.shields.io/badge/Chrome-MV3-1f9d76.svg" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-1f9d76.svg" />
+  <img alt="Monorepo" src="https://img.shields.io/badge/pnpm-Turborepo-1f9d76.svg" />
+</p>
+
+---
+
+## What it does
+
+- 🎙️ **Real-time voice.** A persistent Gemini Live session streams your 16 kHz mic audio up and speaks answers back — a genuine conversation, not press-to-talk.
+- 👁️ **It sees your screen.** A live vision stream lets the assistant reason about the chart or holdings you're actually looking at.
+- 🔎 **Researches while it talks.** Background research (Gemini + Google Search grounding) runs as fire-and-forget tool calls; results are spoken back the moment they land.
+- 🖱️ **Acts on the page.** An Anthropic Claude web agent drives real DOM actions — click, type, scroll, navigate — via the Chrome DevTools Protocol, so it can complete tasks for you.
+- 🔑 **Your keys, your browser.** Users bring their own API keys; they live in local storage and are used only to make their own provider calls.
+
+---
+
+## The core idea: Front Desk / Back Office
+
+The load-bearing design decision. **Gemini Live is the front desk** — it owns a persistent audio session and never stops talking to the user. **Heavy work is the back office** — web automation and stock research are dispatched to background workers via tool calls that *return immediately*. When a worker finishes, its result is injected back into the live session as a content part, so the assistant can speak the answer naturally without the awkward silence that kills voice UX.
+
+This is what lets Compass stay conversational while doing genuinely slow work (a multi-step page automation, a grounded research pass) underneath.
 
 ---
 
 ## Repository Architecture
 
 This is a **pnpm + Turborepo monorepo** containing the full Compass AI stack: a browser extension front end, a Node.js WebSocket API back end, and a shared TypeScript types package.
-
-The **Front Desk / Back Office** pattern is the load-bearing idea. Gemini Live owns a persistent audio session and keeps talking to the user. Heavy work (web automation, stock research) is dispatched to background workers via tool calls that return immediately. Results are injected back into the live session as content parts when the workers finish.
 
 ### Packages
 
