@@ -6,14 +6,11 @@ import { SYSTEM_PROMPT } from './web-prompt.js';
 import { mapToolUse, TOOLS, type MappedStep } from './web-tools.js';
 import type { WebAgentMemory } from './web-memory.js';
 
-if (!process.env.CLAUDE_API_KEY) {
-	throw new Error('CLAUDE_API_KEY environment variable is not set');
-}
+// The Anthropic client is now passed in per-session (built from the user's
+// key); only the model id stays in env.
 if (!process.env.CLAUDE_WEB_MODEL) {
 	throw new Error('CLAUDE_WEB_MODEL environment variable is not set');
 }
-
-const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 const COMPUTER_BETA = 'computer-use-2025-11-24';
 
@@ -221,6 +218,7 @@ function pruneOldScreenshots(messages: Anthropic.Beta.BetaMessageParam[], keep: 
 }
 
 export async function runWebAgentStep(
+	anthropic: Anthropic,
 	memory: WebAgentMemory,
 	observation: WebObservation
 ): Promise<{ step: WebStep; usage: TokenUsage }> {

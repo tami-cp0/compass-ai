@@ -29,6 +29,12 @@ const base = pino({
       "*.cookie",
       "*.password",
       "*.token",
+      // User-provided LLM keys arrive under a `keys` object on session_start;
+      // never let them reach a log sink, at top level or nested.
+      "keys.gemini",
+      "keys.claude",
+      "*.keys.gemini",
+      "*.keys.claude",
       "audio",
       "screenshot",
       "data",

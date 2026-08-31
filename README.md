@@ -1,97 +1,60 @@
-# Compass AI
+<h1 align="center">Compass AI</h1>
 
-A voice copilot for [Atlass Portfolios](https://app.atlassportfolios.com). The user speaks to an AI assistant that can automate the page on their behalf and research stocks in real time, without the assistant ever going silent.
+<p align="center">
+  <strong>A voice copilot for the stock market.</strong><br />
+  Talk to it. It watches your screen, researches stocks in real time, and drives the page for you — without ever going silent.
+</p>
 
-> **License:** MIT. Contributions are accepted under the same license — see [LICENSE](LICENSE) and [CONTRIBUTING.md](CONTRIBUTING.md).
+<p align="center">
+  <img src="image.png" alt="Compass AI running live on a stock chart, with the voice pill in the page and the side panel open" width="100%" />
+</p>
 
----
-
-## Repository Architecture
-
-This is a **pnpm + Turborepo monorepo** containing the full Compass AI stack: a browser extension front end, a Node.js WebSocket API back end, and a shared TypeScript types package.
-
-The **Front Desk / Back Office** pattern is the load-bearing idea. Gemini Live owns a persistent audio session and keeps talking to the user. Heavy work (web automation, stock research) is dispatched to background workers via tool calls that return immediately. Results are injected back into the live session as content parts when the workers finish.
-
-### Packages
-
-| Path                              | Name                    | Purpose                                                                                  |
-| --------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------- |
-| [apps/api](apps/api/)             | `@compass-ai/api`       | uWebSockets.js gateway, Gemini Live voice session, TaskManager, research + web agents    |
-| [apps/extension](apps/extension/) | `@compass-ai/extension` | Plasmo browser extension: pill UI, mic capture, audio playback, DOM watcher              |
-| [packages/types](packages/types/) | `@compass-ai/types`     | Shared TypeScript types for the WS wire protocol and session/task state                  |
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-1f9d76.svg" /></a>
+  <img alt="Chrome MV3" src="https://img.shields.io/badge/Chrome-MV3-1f9d76.svg" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-1f9d76.svg" />
+  <img alt="Monorepo" src="https://img.shields.io/badge/pnpm-Turborepo-1f9d76.svg" />
+</p>
 
 ---
 
-## Bootstrapping
+## How it works
+
+A persistent **Gemini Live** session owns the audio and never stops talking to the user (the *front desk*). Slow work — page automation, stock research — is dispatched as tool calls that return immediately to background workers (the *back office*); their results are injected back into the live session so the assistant speaks the answer without going silent.
+
+- **Voice** — 16 kHz mic audio streamed up, PCM speech streamed back.
+- **Vision** — a live screen stream lets it reason about the chart you're looking at.
+- **Research** — Gemini + Google Search grounding, run async.
+- **Action** — an Anthropic Claude agent drives real DOM actions via the Chrome DevTools Protocol.
+- **Keys** — users bring their own; stored in-browser, used only for their own calls.
+
+## Packages
+
+| Path | Package | Purpose |
+| --- | --- | --- |
+| [apps/api](apps/api/) | `@compass-ai/api` | uWebSockets.js gateway, Gemini Live session, task manager, research + web agents |
+| [apps/extension](apps/extension/) | `@compass-ai/extension` | Plasmo MV3 extension: pill UI, side panel, mic capture, audio playback, action execution |
+| [packages/types](packages/types/) | `@compass-ai/types` | Shared WS wire-protocol and session/task types |
+
+## Run it
 
 ```powershell
-# 1. Install all workspace dependencies
 pnpm install
-
-# 2. Copy and fill in env for each app
-cp apps/api/.env.example apps/api/.env
+cp apps/api/.env.example apps/api/.env             # fill in — required at startup
 cp apps/extension/.env.example apps/extension/.env
-#   then edit both — every value is required and the app throws at startup if missing
-
-# 3. Start Redis locally (or point REDIS_URL at a remote one)
-#   e.g. docker run -p 6379:6379 redis:7-alpine
-
-# 4. Run the whole stack in dev mode (API + extension HMR)
-pnpm dev
+pnpm dev                                            # API + extension HMR
 ```
 
-Then load the extension build at `apps/extension/build/chrome-mv3-dev/` as an unpacked extension in Chrome and navigate to `https://app.atlassportfolios.com`.
+Load `apps/extension/build/chrome-mv3-dev/` as an unpacked extension at `chrome://extensions` (Developer mode on). The pill appears on every page.
 
----
-
-## Monorepo Tooling
-
-The workspace is managed by **[Turborepo](https://turbo.build/)** on top of pnpm workspaces. The task pipeline lives in [turbo.json](turbo.json):
-
-| Command           | What it does                                                                  |
-| ----------------- | ----------------------------------------------------------------------------- |
-| `pnpm dev`        | Runs `dev` in every package in parallel (persistent, no cache)                |
-| `pnpm build`      | Builds every package; honours `^build` so `types` builds before its consumers |
-| `pnpm typecheck`  | Type-checks every package; depends on upstream `build` for declaration files  |
-
-To run a task in just one package, use pnpm's filter:
-
-```powershell
-pnpm --filter @compass-ai/api dev
-pnpm --filter @compass-ai/extension build
-pnpm --filter @compass-ai/types build
-```
-
-`pnpm-workspace.yaml` lists which native dependencies are allowed to run install scripts (`@google/genai`, `esbuild`, `lmdb`, etc). Add to `allowBuilds` when a new native dep needs to be compiled.
-
----
+Root tasks: `pnpm dev`, `pnpm build`, `pnpm typecheck` (Turborepo, `^build` ordered). Scope to one package with `pnpm --filter <name> <task>`.
 
 ## Contributing
 
-Setup, dev workflow, coding conventions, and the wire-protocol change process live in [CONTRIBUTING.md](CONTRIBUTING.md). In short: TypeScript everywhere with `strict` on, `pnpm typecheck` must pass, wire-protocol changes go through `packages/types` first, and commits follow conventional-commit style.
-
----
-
-## Directory Structure
-
-```
-compass-ai/
-├── apps/
-│   ├── api/                    # WebSocket API + Gemini Live + agents
-│   └── extension/              # Plasmo Chrome extension (MV3)
-├── packages/
-│   └── types/                  # Shared WS messages + session/task types
-├── package.json                # Root scripts + turbo
-├── pnpm-workspace.yaml         # Workspace globs + allowBuilds
-└── turbo.json                  # Task pipeline
-```
-
----
+Conventions and the wire-protocol change process are in [CONTRIBUTING.md](CONTRIBUTING.md): `strict` TypeScript, `pnpm typecheck` must pass, wire-protocol changes go through `packages/types` first, conventional commits.
 
 ## License
 
-Compass AI is licensed under the **MIT License**. See [LICENSE](LICENSE) for the full text.
+MIT — see [LICENSE](LICENSE).
 
-MIT is a permissive license: you may use, copy, modify, and distribute the software — including in closed-source and commercial products — provided you keep the copyright notice and license text. The software is provided "as is", without warranty.
-
-**Disclaimer:** Compass AI is an independent, unaffiliated project. It is **not** affiliated with, associated with, authorized by, endorsed by, or in any way officially connected to Atlass Portfolios or its owners. "Atlass Portfolios" and any related names or marks are the property of their respective owners and are used here only to describe the third-party website this tool interoperates with.
+> **Disclaimer:** An independent, unaffiliated project. Not affiliated with, endorsed by, or connected to any stockbroking platform. Any platform names referenced are the property of their owners and used only to describe sites this tool interoperates with.

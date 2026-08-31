@@ -4,11 +4,17 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { PcmCapture } from "~/audio/pcm-capture"
 
 import { player } from "../lib/audio-runtime"
+import { canStartSession, CREDENTIALS_KEY, getCredentials, isValidEmail, sessionKeys, voiceName, type Credentials } from "../lib/credentials"
+import { clearStashedError, SESSION_ERROR_STORAGE_KEY, stashClientError } from "./use-session-error"
 
 type StripSessionId<T> = T extends { sessionId: string } ? Omit<T, "sessionId"> : T
 type OutboundExtensionMessage = StripSessionId<ExtensionMessage>
 
 export type ConnectionStatus = "ok" | "degraded" | "disconnected"
+
+// storage.session flag the side panel sets while it's mounted, so the pill can
+// suppress the "click me" badge when the panel is already open.
+export const PANEL_OPEN_KEY = "compass:panelOpen"
 
 export interface ResearchTask {
   taskId: string
@@ -27,6 +33,15 @@ export interface UseSession {
   isVisionOn:          boolean
   connectionStatus:    ConnectionStatus
   isOffline:           boolean
+  // Set when a start attempt was blocked (missing keys) or the server rejected
+  // the session (session_error). Cleared on the next successful start.
+  sessionError:        string | null
+  // True while an error popup is stashed but the panel hasn't shown it yet. The
+  // pill renders a "click me" badge; clicking opens the panel (a user gesture).
+  errorPending:        boolean
+  // True while the side panel is open — suppresses the pill's error badge.
+  panelOpen:           boolean
+  pillEnabled:         boolean
   toggle:              () => void
 }
 
@@ -41,7 +56,54 @@ export function useSession(): UseSession {
   const [connectionStatus,    setConnectionStatus]    = useState<ConnectionStatus>("ok")
   const [isOffline,           setIsOffline]           = useState(typeof navigator !== "undefined" && !navigator.onLine)
   const [wantSession,         setWantSession]         = useState(false)
+  const [sessionError,        setSessionError]        = useState<string | null>(null)
+  const [errorPending,        setErrorPending]        = useState(false)
+  const [pillEnabled,         setPillEnabled]         = useState(true)
+  const [panelOpen,           setPanelOpen]           = useState(false)
   const captureRef = useRef<PcmCapture | null>(null)
+  // Holds the latest teardownCapture so the mount-time message listener (which
+  // closes over nothing) can tear down capture on a session_error.
+  const teardownCaptureRef = useRef<(() => void) | null>(null)
+  // Latest credentials, kept in a ref so the click handler can decide
+  // synchronously (within the user gesture) whether setup is incomplete — needed
+  // because chrome.sidePanel.open() must run inside the gesture, before awaits.
+  const credsRef = useRef<Credentials | null>(null)
+
+  // Track whether the side panel is open (it writes PANEL_OPEN_KEY to
+  // storage.session while mounted). Used to suppress the pill's "click me" badge
+  // when the panel is already showing.
+  useEffect(() => {
+    chrome.storage.session
+      .get(PANEL_OPEN_KEY)
+      .then((s) => setPanelOpen(!!s[PANEL_OPEN_KEY]))
+    const onChanged = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      area: string
+    ) => {
+      if (area !== "session" || !changes[PANEL_OPEN_KEY]) return
+      setPanelOpen(!!changes[PANEL_OPEN_KEY].newValue)
+    }
+    chrome.storage.onChanged.addListener(onChanged)
+    return () => chrome.storage.onChanged.removeListener(onChanged)
+  }, [])
+
+  // Keep the pill's error badge in sync with the stashed error: present → badge
+  // on, removed (panel dismissed it) → badge off. Covers errors stashed by the
+  // pill itself and by the background (server-pushed).
+  useEffect(() => {
+    chrome.storage.local
+      .get(SESSION_ERROR_STORAGE_KEY)
+      .then((s) => setErrorPending(!!s[SESSION_ERROR_STORAGE_KEY]))
+    const onChanged = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      area: string
+    ) => {
+      if (area !== "local" || !changes[SESSION_ERROR_STORAGE_KEY]) return
+      setErrorPending(!!changes[SESSION_ERROR_STORAGE_KEY].newValue)
+    }
+    chrome.storage.onChanged.addListener(onChanged)
+    return () => chrome.storage.onChanged.removeListener(onChanged)
+  }, [])
 
   useEffect(() => {
     const onOnline  = () => setIsOffline(false)
@@ -95,6 +157,24 @@ export function useSession(): UseSession {
         setIsVisionOn(false)
         return false
       }
+      if (msg.type === "session_error") {
+        // Any provider error ends the session — once it fires (e.g. Gemini out
+        // of credits mid-research) the live model stops responding anyway. Send
+        // session_end so the server closes the Gemini Live session and drops its
+        // resumption handle (otherwise research/automation errors, which leave
+        // the live session running, would orphan it and a later reconnect could
+        // try to resume a dead session). Then tear down local capture. Raise the
+        // "click me" badge so the user can open the panel to the stashed popup
+        // (the SW can't auto-open it — no user gesture on a server-pushed error).
+        setSessionError(msg.reason)
+        setErrorPending(true)
+        setWantSession(false)
+        setResearchTasks([])
+        setIsVisionOn(false)
+        chrome.runtime.sendMessage({ type: "session_end" })
+        teardownCaptureRef.current?.()
+        return false
+      }
       if (msg.type === "connection_status") {
         setConnectionStatus(msg.status)
         // Server can't deliver automation_end or research_status through a
@@ -122,8 +202,31 @@ export function useSession(): UseSession {
     setActive(false)
   }, [])
 
-  const startSession = useCallback(async () => {
-    chrome.runtime.sendMessage({ type: "session_start" })
+  // Keep the ref pointed at the latest teardownCapture so the mount-time
+  // message listener can call it on session_error.
+  teardownCaptureRef.current = teardownCapture
+
+  // Attempts to start a session. Reads the user's stored credentials and gates
+  // on them (Gemini always, Claude when web automation is on); if insufficient,
+  // sets sessionError and returns false without starting. Otherwise attaches the
+  // keys to session_start and begins mic capture. Returns whether it started.
+  const startSession = useCallback(async (): Promise<boolean> => {
+    const creds = await getCredentials()
+    if (!canStartSession(creds)) {
+      // Safety net for non-gesture callers (e.g. offline auto-resume). The
+      // in-gesture path in `toggle` already opens the panel + stashes the
+      // missing-key popup; here we just refuse to start.
+      setSessionError("Open Compass from the toolbar to finish setup.")
+      return false
+    }
+    setSessionError(null)
+    chrome.runtime.sendMessage({
+      type:          "session_start",
+      keys:          sessionKeys(creds),
+      webAutomation: creds.webAutomation,
+      email:         creds.email,
+      voiceName:     voiceName(creds),
+    } as OutboundExtensionMessage)
     const capture = new PcmCapture((base64Pcm: string) => {
       chrome.runtime.sendMessage({
         type:     "audio_chunk",
@@ -131,9 +234,27 @@ export function useSession(): UseSession {
         mimeType: "audio/pcm"
       } as OutboundExtensionMessage)
     })
-    await capture.start()
+    try {
+      await capture.start()
+    } catch (err) {
+      // Mic denied / no device. Tear the just-started server session back down
+      // (no audio is coming), stash the error so the side panel pops the mic
+      // popup, and open the panel. Return false so wantSession stays false.
+      chrome.runtime.sendMessage({ type: "session_end" })
+      const kind =
+        err instanceof DOMException && err.name === "NotFoundError"
+          ? "mic_missing"
+          : "mic_denied"
+      // Stash the error (storage works from a content script) then ask the
+      // background to open the side panel (sidePanel.open isn't available here).
+      await stashClientError(kind, err instanceof Error ? err.message : String(err))
+      chrome.runtime.sendMessage({ type: "open_side_panel" })
+      setSessionError("Microphone unavailable.")
+      return false
+    }
     captureRef.current = capture
     setActive(true)
+    return true
   }, [])
 
   // Explicit user stop: tear down mic AND tell the server, which closes the
@@ -147,13 +268,126 @@ export function useSession(): UseSession {
   }, [teardownCapture])
 
   const toggle = useCallback(() => {
+    // An error popup is stashed but unseen — clicking the pill (a user gesture)
+    // opens the panel so Chrome allows it. Don't start a session on this click.
+    // Drop the badge immediately as the panel opens (the popup itself now
+    // carries the message); the stash stays until the popup is dismissed.
+    if (errorPending) {
+      chrome.runtime.sendMessage({ type: "open_side_panel" })
+      setErrorPending(false)
+      return
+    }
     if (wantSession) {
       stopSession()
-    } else {
-      setWantSession(true)
-      startSession().catch(console.error)
+      return
     }
-  }, [wantSession, startSession, stopSession])
+
+    // Setup-incomplete check runs SYNCHRONOUSLY here (from the click's user
+    // gesture) using the cached creds. Content scripts can't call
+    // chrome.sidePanel directly, so we message the SW to open it — but the
+    // message MUST be sent inside the gesture (before any await) or Chrome
+    // rejects the open. We re-validate in startSession for async callers.
+    const creds = credsRef.current
+    if (creds && !canStartSession(creds)) {
+      // Fire the open first, still in-gesture.
+      chrome.runtime.sendMessage({ type: "open_side_panel" })
+      setSessionError("Open Compass from the toolbar to finish setup.")
+
+      const signedUp = isValidEmail(creds.email)
+      if (signedUp) {
+        // Onboarded, just missing a key → stash a popup naming the provider.
+        const missing =
+          !creds.geminiKey.trim() ? "gemini"
+          : creds.webAutomation && !creds.claudeKey.trim() ? "claude"
+          : null
+        if (missing) {
+          void stashClientError(
+            "missing_key",
+            `${missing === "gemini" ? "Gemini" : "Claude"} API key is not set.`,
+            missing
+          )
+        }
+      } else {
+        // Not signed up yet — no key popup. Opening the panel shows onboarding;
+        // clear any stale stashed error so a popup doesn't cover the pill.
+        void clearStashedError()
+      }
+      return
+    }
+
+    // Unlock the audio output NOW, while the click gesture is active. Incoming
+    // Gemini audio arrives after the async handshake (no gesture), so without
+    // this the AudioContext stays suspended under Chrome's autoplay policy and
+    // playback is silent.
+    player.prime()
+
+    // Only enter the wanted-session state if the start actually began (keys
+    // present). A blocked start sets sessionError and leaves wantSession false
+    // so offline auto-resume can't loop on it.
+    startSession()
+      .then((started) => {
+        if (started) setWantSession(true)
+      })
+      .catch(console.error)
+  }, [wantSession, errorPending, startSession, stopSession])
+
+  const stopIfActiveRef = useRef<() => void>(() => {})
+  stopIfActiveRef.current = () => { if (wantSession) stopSession() }
+
+  // Restart an active session in place: stop, then start again with the latest
+  // credentials. Used when a setting changes that's baked into the session at
+  // connect time (e.g. voice) but the user shouldn't have to re-click the pill.
+  const restartIfActiveRef = useRef<() => void>(() => {})
+  restartIfActiveRef.current = () => {
+    if (!wantSession) return
+    stopSession()
+    // Let the stop settle (session_end sent, capture torn down) before starting
+    // fresh; the new session picks up the changed setting from storage.
+    setTimeout(() => {
+      startSession()
+        .then((started) => setWantSession(started))
+        .catch(console.error)
+    }, 250)
+  }
+
+  useEffect(() => {
+    getCredentials().then((c) => {
+      setPillEnabled(c.pillEnabled)
+      credsRef.current = c
+    })
+    const onChanged = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      area: string
+    ) => {
+      if (area !== "local" || !changes[CREDENTIALS_KEY]) return
+      const change = changes[CREDENTIALS_KEY]
+      const next = change.newValue as Credentials | undefined
+      const prev = change.oldValue as Credentials | undefined
+      if (!next) return
+      credsRef.current = next
+      setPillEnabled(next.pillEnabled)
+      if (!next.pillEnabled) {
+        stopIfActiveRef.current()
+        return
+      }
+      // Web automation changes what the session is built with (Claude client +
+      // tools). We can't mutate a live Gemini session's capabilities, so end it;
+      // the user restarts and the new session is rebuilt with the new setting,
+      // which is how Gemini becomes aware of the change.
+      if (prev && prev.webAutomation !== next.webAutomation) {
+        stopIfActiveRef.current()
+        return
+      }
+      // Voice is baked into the Gemini connect config, so a live switch needs a
+      // reconnect. Restart in place so the new voice takes effect immediately
+      // without the user re-clicking the pill.
+      if (prev && prev.voice !== next.voice) {
+        restartIfActiveRef.current()
+      }
+    }
+    chrome.storage.onChanged.addListener(onChanged)
+    return () => chrome.storage.onChanged.removeListener(onChanged)
+  }, [])
 
   // Auto-stop on offline; auto-resume on online only if we paused it ourselves.
   const pausedByOfflineRef = useRef(false)
@@ -171,5 +405,5 @@ export function useSession(): UseSession {
     }
   }, [isOffline, wantSession, teardownCapture, startSession])
 
-  return { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, toggle }
+  return { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, sessionError, errorPending, panelOpen, pillEnabled, toggle }
 }

@@ -9,7 +9,6 @@ declare module "*.css" {
 declare namespace NodeJS {
   interface ProcessEnv {
     readonly PLASMO_PUBLIC_WS_URL?: string
-    readonly PLASMO_PUBLIC_HOST_MATCH?: string
     readonly NODE_ENV?: "development" | "production"
   }
 }

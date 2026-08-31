@@ -1,7 +1,8 @@
+import '../infra/env.js'; // must be first — loads .env before config modules read it
 import { us_listen_socket_close, type us_listen_socket } from 'uWebSockets.js';
-import { connectRedis, redis } from '../infra/redis.js';
 import { startServer, shutdownAllSessions } from './server.js';
 import { logger } from '../infra/logger.js';
+import { initEmailStore } from '../infra/email-store.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
@@ -33,9 +34,6 @@ function shutdown(signal: string, listenSocket: us_listen_socket | false): void 
 			// 2. Close all active Gemini sessions (parallel, summarised)
 			await shutdownAllSessions();
 
-			// 3. Flush in-flight Redis commands and close the connection
-			await redis.quit();
-
 			logger.info('Shutdown complete');
 		} catch (err: unknown) {
 			logger.error('Error during shutdown', {
@@ -51,11 +49,20 @@ async function main() {
 	logger.info('Starting Compass API', {
 		nodeEnv: process.env.NODE_ENV,
 		geminiModel: process.env.GEMINI_LIVE_MODEL,
-		researchModel: process.env.OPENAI_RESEARCH_MODEL,
-		quickSearchModel: process.env.OPENAI_ALT_RESEARCH_MODEL,
+		researchFastModel: process.env.GEMINI_RESEARCH_FAST_MODEL,
+		researchDeepModel: process.env.GEMINI_RESEARCH_DEEP_MODEL,
 		webModel: process.env.CLAUDE_WEB_MODEL,
 	});
-	await connectRedis();
+
+	// Best-effort: create the emails table if a DB is configured. A failure here
+	// (or no DATABASE_URL) must not stop the server from coming up — recordEmail
+	// is itself best-effort at the call site.
+	await initEmailStore().catch((err: unknown) =>
+		logger.warn('initEmailStore failed — email recording may be unavailable', {
+			error: err instanceof Error ? err.message : String(err),
+		})
+	);
+
 	const listenSocket = startServer();
 
 	process.once('SIGTERM', () => shutdown('SIGTERM', listenSocket));

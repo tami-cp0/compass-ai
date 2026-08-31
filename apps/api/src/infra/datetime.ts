@@ -1,7 +1,7 @@
 // Human-readable timestamp helper for orchestrator injections and the
 // Gemini Live session-start system prompt. Anchored to Africa/Lagos
-// because the user, the market (NGX), and the broker (Atlass) are all
-// in West Africa Time — no timezone conversion needed at the model layer.
+// because the user and the market (NGX) are in West Africa Time —
+// no timezone conversion needed at the model layer.
 
 const FORMATTER = new Intl.DateTimeFormat('en-GB', {
 	timeZone: 'Africa/Lagos',

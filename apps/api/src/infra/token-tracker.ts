@@ -35,18 +35,15 @@ interface AutomationTask {
   cachedInputTokens: number
 }
 
-export type ResearchKind = "deep" | "quick"
-
 interface ResearchTask {
   taskId: string
   name: string
-  kind: ResearchKind
   usage: TokenUsage
 }
 
-// Per-kind research rollup so the report shows deep-research vs quick_search
-// separately — they have very different cost profiles.
-interface ResearchKindTotals {
+// Research rollup for the summary. Single path now — one grounded-prose agent
+// whose depth scales with the query — so there's no per-kind split.
+interface ResearchTotals {
   count: number
   totalTokens: number
   inputTokens: number
@@ -89,8 +86,7 @@ interface SessionReport {
   totals: TaskTotals & { research: number; automation: number; live: number }
   // Quick, glanceable rollups at the top of the file.
   summary: {
-    researchDeep: ResearchKindTotals
-    researchQuick: ResearchKindTotals
+    research: ResearchTotals
     automation: { runs: number; steps: number; totalTokens: number; cachedInputTokens: number }
     live: { calls: number; totalTokens: number; cachedInputTokens: number; frameTokens: number }
     vision: VisionUsage
@@ -101,7 +97,7 @@ interface SessionReport {
   vision: VisionUsage
 }
 
-function emptyKindTotals(): ResearchKindTotals {
+function emptyResearchTotals(): ResearchTotals {
   return { count: 0, totalTokens: 0, inputTokens: 0, outputTokens: 0 }
 }
 
@@ -113,8 +109,7 @@ function emptyReport(sessionId: string): SessionReport {
     lastUpdatedAt: now,
     totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, research: 0, automation: 0, live: 0 },
     summary: {
-      researchDeep: emptyKindTotals(),
-      researchQuick: emptyKindTotals(),
+      research: emptyResearchTotals(),
       automation: { runs: 0, steps: 0, totalTokens: 0, cachedInputTokens: 0 },
       live: { calls: 0, totalTokens: 0, cachedInputTokens: 0, frameTokens: 0 },
       vision: { enableCount: 0, byMode: {}, framesSent: 0 },
@@ -151,9 +146,9 @@ export class TokenTracker {
     }
   }
 
-  recordResearch(taskId: string, name: string, usage: TokenUsage, kind: ResearchKind): void {
+  recordResearch(taskId: string, name: string, usage: TokenUsage): void {
     if (!this.enabled) return
-    this.report.research.push({ taskId, name, kind, usage })
+    this.report.research.push({ taskId, name, usage })
     this.recompute()
     this.flush()
   }
@@ -236,18 +231,14 @@ export class TokenTracker {
     }
 
     // Glanceable summary rollups.
-    const kindTotals = (kind: ResearchKind): ResearchKindTotals => {
-      const rows = this.report.research.filter((r) => r.kind === kind)
-      return {
-        count: rows.length,
-        totalTokens: rows.reduce((s, r) => s + r.usage.totalTokens, 0),
-        inputTokens: rows.reduce((s, r) => s + r.usage.inputTokens, 0),
-        outputTokens: rows.reduce((s, r) => s + r.usage.outputTokens, 0),
-      }
+    const research: ResearchTotals = {
+      count: this.report.research.length,
+      totalTokens: this.report.research.reduce((s, r) => s + r.usage.totalTokens, 0),
+      inputTokens: this.report.research.reduce((s, r) => s + r.usage.inputTokens, 0),
+      outputTokens: this.report.research.reduce((s, r) => s + r.usage.outputTokens, 0),
     }
     this.report.summary = {
-      researchDeep: kindTotals("deep"),
-      researchQuick: kindTotals("quick"),
+      research,
       automation: {
         runs: this.report.automation.length,
         steps: this.report.automation.reduce((s, a) => s + a.steps.length, 0),

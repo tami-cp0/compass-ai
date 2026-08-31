@@ -1,16 +1,20 @@
 import { App, DISABLED, type us_listen_socket } from 'uWebSockets.js';
 import { v4 as uuidv4 } from 'uuid';
-import type { ExtensionMessage, ServerMessage } from '@compass-ai/types';
+import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
+import type { ExtensionMessage, ServerMessage, SessionKeys } from '@compass-ai/types';
 import { createSession, deleteSession, sessionCount } from './session-store.js';
 import { logger, sessionLogger } from '../infra/logger.js';
 import { GeminiLiveSession } from '../agents/conversation/gemini-live-session.js';
 import {
-	deleteResumptionHandle,
+	clearSessionHistory,
 	getConversationHistory,
 	getResumptionHandle,
-} from '../infra/redis.js';
+} from '../infra/session-history.js';
 import { TaskManager } from './task-manager.js';
 import { unwrapOuterFence } from './pane-estimate.js';
+import { classifyProviderError } from '../infra/provider-errors.js';
+import { recordEmail } from '../infra/email-store.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +48,38 @@ interface ApiSession {
 	startedAt: number;
 }
 
+// Validate the user-provided keys that arrived on session_start/resume. Gemini
+// is always required; Claude is required only when web automation is on. Returns
+// the built per-session clients, or an error reason to reject the session with.
+function buildSessionClients(
+	keys: SessionKeys | undefined,
+	webAutomation: boolean
+):
+	| { ok: true; geminiClient: GoogleGenAI; claudeClient: Anthropic | null }
+	| { ok: false; reason: string; provider: 'gemini' | 'claude' } {
+	const geminiKey = keys?.gemini?.trim();
+	if (!geminiKey) {
+		return {
+			ok: false,
+			provider: 'gemini',
+			reason: 'A Gemini API key is required to start a session.',
+		};
+	}
+	let claudeClient: Anthropic | null = null;
+	if (webAutomation) {
+		const claudeKey = keys?.claude?.trim();
+		if (!claudeKey) {
+			return {
+				ok: false,
+				provider: 'claude',
+				reason: 'A Claude API key is required when web automation is enabled.',
+			};
+		}
+		claudeClient = new Anthropic({ apiKey: claudeKey });
+	}
+	return { ok: true, geminiClient: new GoogleGenAI({ apiKey: geminiKey }), claudeClient };
+}
+
 const apiSessions = new Map<string, ApiSession>();
 
 function emitSessionSummary(sessionId: string, apiSession: ApiSession, closeCode?: number, closeReason?: string): void {
@@ -60,11 +96,10 @@ function emitSessionSummary(sessionId: string, apiSession: ApiSession, closeCode
 		automationCompleted: m.automationCompleted,
 		automationFailed: m.automationFailed,
 		automationSteps: m.automationSteps,
-		// Token rollup (dev only; zeros in prod). Deep research vs quick_search
-		// are split, automation/live show cache savings, vision shows usage.
+		// Token rollup (dev only; zeros in prod). Single research path now;
+		// automation/live show cache savings, vision shows usage.
 		tokens: {
-			deepResearch: { count: t.researchDeep.count, total: t.researchDeep.totalTokens },
-			quickSearch: { count: t.researchQuick.count, total: t.researchQuick.totalTokens },
+			research: { count: t.research.count, total: t.research.totalTokens },
 			automation: { runs: t.automation.runs, steps: t.automation.steps, total: t.automation.totalTokens, cached: t.automation.cachedInputTokens },
 			live: { calls: t.live.calls, total: t.live.totalTokens, cached: t.live.cachedInputTokens, frames: t.live.frameTokens },
 			vision: { timesEnabled: t.vision.enableCount, byMode: t.vision.byMode, framesSent: t.vision.framesSent },
@@ -142,6 +177,29 @@ export function startServer(): us_listen_socket | false {
 			};
 
 			if (msg.type === 'session_start' || msg.type === 'session_resume') {
+				// Build the per-session LLM clients from the user's keys before
+				// touching any session state. Reject early on missing/invalid keys.
+				const built = buildSessionClients(msg.keys, msg.webAutomation);
+				if (!built.ok) {
+					logger.warn('Session rejected — missing key', { reason: built.reason });
+					send({
+						type: 'session_error',
+						reason: built.reason,
+						kind: 'missing_key',
+						provider: built.provider,
+					});
+					return;
+				}
+				const { geminiClient, claudeClient } = built;
+
+				// Record the user's email (the only identity we keep — never keys).
+				// Best-effort: a store failure must not block the session.
+				recordEmail(msg.email ?? '').catch((err: unknown) =>
+					logger.warn('recordEmail failed', {
+						error: err instanceof Error ? err.message : String(err),
+					})
+				);
+
 				const existing = ws.getUserData().sessionId;
 				if (existing) {
 					const prev = apiSessions.get(existing);
@@ -155,7 +213,8 @@ export function startServer(): us_listen_socket | false {
 				}
 
 				// Reuse the requested sessionId only if Gemini still has its context
-				// (i.e. handle is in Redis). Otherwise we start clean with a new id.
+				// (i.e. the handle is still in the in-memory store). Otherwise we
+				// start clean with a new id.
 				const resumeHandle =
 					msg.type === 'session_resume'
 						? await getResumptionHandle(msg.sessionId)
@@ -166,13 +225,12 @@ export function startServer(): us_listen_socket | false {
 
 				const history = await getConversationHistory(sessionId);
 				const session = createSession(sessionId, send);
-				const gemini = new GeminiLiveSession(sessionId, send, history);
-				const taskManager = new TaskManager(session, gemini);
+				const gemini = new GeminiLiveSession(sessionId, send, history, geminiClient, msg.voiceName);
+				const taskManager = new TaskManager(session, gemini, geminiClient, claudeClient);
 				apiSessions.set(sessionId, { sessionId, gemini, taskManager, startedAt: Date.now() });
 
 				gemini.onDispatchResearch = (name, desc) =>
 					taskManager.dispatchResearch(name, desc);
-				gemini.onQuickSearch = (query) => taskManager.quickSearch(query);
 				gemini.onDispatchAutomation = (name, desc) =>
 					taskManager.dispatchAutomation(name, desc);
 				gemini.onCancelTask = (name, scope) => taskManager.cancel(name, scope);
@@ -253,7 +311,32 @@ export function startServer(): us_listen_socket | false {
 					return { status: 'minimized' };
 				};
 
-				await gemini.connect({ resumeHandle });
+				// A bad Gemini key or exhausted quota throws here (connect is the
+				// first real call to the API). Classify it, tear the half-built
+				// session down, and reject with a structured error the client can
+				// turn into the right popup.
+				try {
+					await gemini.connect({ resumeHandle });
+				} catch (err) {
+					const classified = classifyProviderError('gemini', err);
+					logger.warn('Gemini connect failed — rejecting session', {
+						sessionId,
+						kind: classified.kind,
+						reason: classified.reason,
+					});
+					await gemini.close().catch(() => {});
+					apiSessions.delete(sessionId);
+					deleteSession(sessionId);
+					clearSessionHistory(sessionId);
+					ws.getUserData().sessionId = null;
+					send({
+						type: 'session_error',
+						reason: classified.reason,
+						kind: classified.kind,
+						provider: classified.provider,
+					});
+					return;
+				}
 
 				ws.send(
 					JSON.stringify({
@@ -282,9 +365,15 @@ export function startServer(): us_listen_socket | false {
 					apiSessions.delete(sessionId);
 				}
 				deleteSession(sessionId);
-				await deleteResumptionHandle(sessionId);
+				clearSessionHistory(sessionId);
 				ws.getUserData().sessionId = null;
 				logger.info('Session ended by client', { sessionId, activeSessions: sessionCount() });
+				return;
+			}
+
+			// Keepalive — no-op. Its only job is to keep the socket (and the
+			// extension's service worker) alive; it needs no active session.
+			if (msg.type === 'ping') {
 				return;
 			}
 

@@ -1,251 +1,188 @@
+import { ThinkingLevel, type GoogleGenAI } from '@google/genai';
 import { logger } from '../../infra/logger.js';
 import type { TokenUsage } from '../../infra/token-tracker.js';
-import { buildStockAnalysisPrompt, openai } from './agent-config.js';
+import {
+	buildTriagePrompt,
+	buildDeepResearchPrompt,
+	ESCALATE_SENTINEL,
+} from './agent-config.js';
 
-export interface TemporalValidation {
-	data_as_of_date: string;
-	most_recent_quarter_analyzed: string;
-	metric_period_used: string | null;
-}
-
-export interface BaselineMetrics {
-	price: number | null;
-	pe_ratio: number | null;
-	pb_ratio: number | null;
-	roe: number | null;
-	roa: number | null;
-	eps_ttm: number | null;
-	eps_forward: number | null;
-	dividend_yield: number | null;
-	market_cap: number | null;
-	revenue_growth: number | null;
-	debt_to_equity: number | null;
-}
-
-export interface MetricKeyValuePair {
-	metric_name: string;
-	metric_value: string;
-}
-
-export interface DynamicContext {
-	identified_themes: string[];
-	scraped_evidence: string[];
-	macro_regulatory_updates: string[];
-}
-
-// A primary source worth handing to the user: the actual document/page the
-// research centers on, not every page the search touched. Kept sparse by the
-// prompt's relevance gate.
+// A primary source worth handing to the user: the page the research centres
+// on. Derived from the response's grounding metadata, not a model-authored
+// field — so it reflects what was actually retrieved.
 export interface ResearchSource {
 	url: string;
 	title: string;
 	platform: string;
 }
 
-export interface StockAnalysisOutput {
-	temporal_validation: TemporalValidation;
-	baseline_metrics: BaselineMetrics;
-	additional_metrics: MetricKeyValuePair[];
-	dynamic_context: DynamicContext;
+export interface ResearchOutput {
+	// Grounded prose answer. Depth follows the evidence (see the prompts): a line
+	// for a plain fact from the fast lane, several paragraphs for a causal
+	// question from the deep lane.
+	answer: string;
 	sources: ResearchSource[];
-	// Honesty channel: thin/one-sided/promotional/conflicting coverage gets
-	// flagged here instead of being silently amplified. Null when solid.
-	coverage_notes: string | null;
+	// Which lane produced the answer — 'fast' (Flash-Lite triage) or 'deep'
+	// (Flash 3.6, escalated). For logging/accounting; not shown to the user.
+	tier: 'fast' | 'deep';
 }
 
-export type ResearchOutput = StockAnalysisOutput;
+// Africa/Lagos date parts for the prompt's temporal anchor — the whole app is
+// WAT (user + NGX), so no conversion is needed at the model layer.
+const DATE_FMT = new Intl.DateTimeFormat('en-GB', {
+	timeZone: 'Africa/Lagos',
+	weekday: 'long',
+	day: 'numeric',
+	month: 'long',
+	year: 'numeric',
+});
 
-const sourcesSchema = {
-	type: 'array',
-	items: {
-		type: 'object',
-		properties: {
-			url: { type: 'string' },
-			title: { type: 'string' },
-			platform: { type: 'string' },
-		},
-		required: ['url', 'title', 'platform'],
-		additionalProperties: false,
-	},
-};
+function currentDateParts(): { currentDate: string; dayOfWeek: string } {
+	const parts = DATE_FMT.formatToParts(new Date());
+	const get = (type: Intl.DateTimeFormatPartTypes) =>
+		parts.find((p) => p.type === type)?.value ?? '';
+	const dayOfWeek = get('weekday');
+	const currentDate = `${get('day')} ${get('month')} ${get('year')}`;
+	return { currentDate, dayOfWeek };
+}
 
-const stockAnalysisSchema = {
-	type: 'object',
-	properties: {
-		temporal_validation: {
-			type: 'object',
-			properties: {
-				data_as_of_date: { type: 'string' },
-				most_recent_quarter_analyzed: { type: 'string' },
-				metric_period_used: { type: ['string', 'null'] },
-			},
-			required: ['data_as_of_date', 'most_recent_quarter_analyzed', 'metric_period_used'],
-			additionalProperties: false,
-		},
-		baseline_metrics: {
-			type: 'object',
-			properties: {
-				price: { type: ['number', 'null'] },
-				pe_ratio: { type: ['number', 'null'] },
-				pb_ratio: { type: ['number', 'null'] },
-				roe: { type: ['number', 'null'] },
-				roa: { type: ['number', 'null'] },
-				eps_ttm: { type: ['number', 'null'] },
-				eps_forward: { type: ['number', 'null'] },
-				dividend_yield: { type: ['number', 'null'] },
-				market_cap: { type: ['number', 'null'] },
-				revenue_growth: { type: ['number', 'null'] },
-				debt_to_equity: { type: ['number', 'null'] },
-			},
-			required: [
-				'price',
-				'pe_ratio',
-				'pb_ratio',
-				'roe',
-				'roa',
-				'eps_ttm',
-				'eps_forward',
-				'dividend_yield',
-				'market_cap',
-				'revenue_growth',
-				'debt_to_equity',
-			],
-			additionalProperties: false,
-		},
-		additional_metrics: {
-			type: 'array',
-			items: {
-				type: 'object',
-				properties: {
-					metric_name: { type: 'string' },
-					metric_value: { type: 'string' },
-				},
-				required: ['metric_name', 'metric_value'],
-				additionalProperties: false,
-			},
-		},
-		dynamic_context: {
-			type: 'object',
-			properties: {
-				identified_themes: { type: 'array', items: { type: 'string' } },
-				scraped_evidence: { type: 'array', items: { type: 'string' } },
-				macro_regulatory_updates: { type: 'array', items: { type: 'string' } },
-			},
-			required: ['identified_themes', 'scraped_evidence', 'macro_regulatory_updates'],
-			additionalProperties: false,
-		},
-		sources: sourcesSchema,
-		coverage_notes: { type: ['string', 'null'] },
-	},
-	required: [
-		'temporal_validation',
-		'baseline_metrics',
-		'additional_metrics',
-		'dynamic_context',
-		'sources',
-		'coverage_notes',
-	],
-	additionalProperties: false,
-};
+// Pull primary sources from the response's grounding metadata. Google Search
+// grounding returns groundingChunks[].web.{uri,title,domain}; that's the real
+// list of retrieved pages, which is why we take sources from here rather than
+// asking the model to author them (and why we don't force a JSON schema — a
+// schema and grounding fight each other on this model).
+//
+// We deliberately read ONLY groundingChunks, not urlContextMetadata. Pages the
+// model opens via urlContext were found through its own search first, so they
+// already appear here WITH a title and domain; urlContextMetadata carries only
+// a bare URL (no title/platform), which would make a worse source bar. Discovery
+// is search — there are no user-supplied URLs in the query — so the miss window
+// is negligible and not worth degrading source quality for.
+function extractSources(response: unknown): ResearchSource[] {
+	const candidate = (response as {
+		candidates?: Array<{
+			groundingMetadata?: {
+				groundingChunks?: Array<{
+					web?: { uri?: string; title?: string; domain?: string };
+				}>;
+			};
+		}>;
+	}).candidates?.[0];
+	const chunks = candidate?.groundingMetadata?.groundingChunks ?? [];
 
+	const seen = new Set<string>();
+	const sources: ResearchSource[] = [];
+	for (const chunk of chunks) {
+		const url = chunk.web?.uri;
+		if (!url || seen.has(url)) continue;
+		seen.add(url);
+		sources.push({
+			url,
+			title: chunk.web?.title ?? url,
+			platform: chunk.web?.domain ?? '',
+		});
+		if (sources.length >= 5) break;
+	}
+	return sources;
+}
+
+// usageMetadata → our TokenUsage. Used for both lanes; summed when we escalate.
+function usageOf(response: unknown): TokenUsage {
+	const u = (response as { usageMetadata?: {
+		promptTokenCount?: number;
+		candidatesTokenCount?: number;
+		totalTokenCount?: number;
+		cachedContentTokenCount?: number;
+	} }).usageMetadata;
+	return {
+		inputTokens: u?.promptTokenCount ?? 0,
+		outputTokens: u?.candidatesTokenCount ?? 0,
+		totalTokens: u?.totalTokenCount ?? 0,
+		cachedTokens: u?.cachedContentTokenCount,
+	};
+}
+
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+	return {
+		inputTokens: a.inputTokens + b.inputTokens,
+		outputTokens: a.outputTokens + b.outputTokens,
+		totalTokens: a.totalTokens + b.totalTokens,
+		cachedTokens: (a.cachedTokens ?? 0) + (b.cachedTokens ?? 0),
+	};
+}
+
+// Two-tier research. The fast lane (Flash-Lite) triages every query: it answers
+// simple lookups from snippets, or emits the escalation sentinel. On escalation
+// we run the deep lane (Flash 3.6 + urlContext + HIGH thinking) fresh. Token
+// usage is summed across both calls so accounting reflects the true cost.
 export async function runResearchAgent(
+	ai: GoogleGenAI,
 	description: string,
 	signal?: AbortSignal
 ): Promise<{ result: ResearchOutput; usage: TokenUsage }> {
-	const today = new Date().toISOString().slice(0, 10);
-	const userMessage = `Research query: ${description}`;
-	const model = process.env.OPENAI_RESEARCH_MODEL!;
+	const { currentDate, dayOfWeek } = currentDateParts();
 
-	const response = await openai.responses.create(
-		{
-			model,
-			tools: [{ type: 'web_search' }],
-			input: [
-				{ role: 'system', content: buildStockAnalysisPrompt(today) },
-				{ role: 'user', content: userMessage },
-			],
-			max_output_tokens: 4000,
-			text: {
-				format: {
-					type: 'json_schema',
-					name: 'research_output',
-					strict: true,
-					schema: stockAnalysisSchema,
-				},
-			},
+	// ── Fast lane / triage (Flash-Lite, search only, LOW thinking) ──
+	const fastResponse = await ai.models.generateContent({
+		model: process.env.GEMINI_RESEARCH_FAST_MODEL!,
+		contents: `Research query: ${description}`,
+		config: {
+			systemInstruction: buildTriagePrompt(currentDate, dayOfWeek),
+			tools: [{ googleSearch: {} }],
+			maxOutputTokens: 800,
+			thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+			...(signal ? { abortSignal: signal } : {}),
 		},
-		{ signal }
-	);
-
-	// Extract the text output from the response
-	const outputText = response.output
-		.filter((block) => block.type === 'message')
-		.flatMap((block) => {
-			if (block.type !== 'message') return [];
-			return block.content
-				.filter(
-					(c): c is Extract<typeof c, { type: 'output_text' }> =>
-						c.type === 'output_text'
-				)
-				.map((c) => c.text);
-		})
-		.join('');
-
-	if (!outputText) {
-		throw new Error('ResearchAgent returned empty output');
-	}
-
-	let parsed: ResearchOutput;
-	try {
-		parsed = JSON.parse(outputText) as ResearchOutput;
-	} catch {
-		throw new Error(
-			`ResearchAgent returned unparseable JSON: ${outputText.slice(0, 200)}`
-		);
-	}
-	
-	logger.debug('ResearchAgent completed', {
-		model,
-		themes: parsed.dynamic_context.identified_themes.length,
 	});
+	const fastUsage = usageOf(fastResponse);
+	const fastText = (fastResponse.text ?? '').trim();
 
-	const u = response.usage;
-	const usage: TokenUsage = {
-		inputTokens: u?.input_tokens ?? 0,
-		outputTokens: u?.output_tokens ?? 0,
-		totalTokens: u?.total_tokens ?? 0,
-		cachedTokens: u?.input_tokens_details?.cached_tokens,
-	};
-	return { result: parsed, usage };
-}
+	// Escalate when the sentinel is present. We check `includes` (not strict
+	// equality) so a stray token around it still routes correctly; the deep
+	// lane then re-answers from scratch, so the fast text is discarded.
+	if (!fastText.includes(ESCALATE_SENTINEL)) {
+		if (!fastText) throw new Error('ResearchAgent (fast lane) returned empty output');
+		const result: ResearchOutput = {
+			answer: fastText,
+			sources: extractSources(fastResponse),
+			tier: 'fast',
+		};
+		logger.debug('ResearchAgent fast lane answered', {
+			model: process.env.GEMINI_RESEARCH_FAST_MODEL,
+			sources: result.sources.length,
+		});
+		return { result, usage: fastUsage };
+	}
 
-// Fast, unstructured lookup. No system prompt, no schema — the query goes
-// straight to the small model with web_search, and it answers in plain prose.
-// For quick factual checks (holidays, trading hours, a single figure) where the
-// heavy stock-analysis pipeline would be overkill.
-export async function runQuickSearch(
-	query: string,
-	signal?: AbortSignal
-): Promise<{ answer: string; usage: TokenUsage }> {
-	const response = await openai.responses.create(
-		{
-			model: process.env.OPENAI_ALT_RESEARCH_MODEL!,
-			tools: [{ type: 'web_search' }],
-			input: [{ role: 'user', content: query }],
-			max_output_tokens: 1500,
+	// ── Deep lane (Flash 3.6, search + urlContext, HIGH thinking) ──
+	logger.debug('ResearchAgent escalating to deep lane', { description: description.slice(0, 120) });
+	const deepResponse = await ai.models.generateContent({
+		model: process.env.GEMINI_RESEARCH_DEEP_MODEL!,
+		contents: `Research query: ${description}`,
+		config: {
+			systemInstruction: buildDeepResearchPrompt(currentDate, dayOfWeek),
+			// googleSearch finds candidate pages (snippets); urlContext lets the
+			// model actually OPEN and read them in full — which the prompt's
+			// "READING, NOT SKIMMING" rules require. Snippets alone can't satisfy
+			// "read the tables, the notes and the fine print before quoting".
+			tools: [{ googleSearch: {} }, { urlContext: {} }],
+			maxOutputTokens: 4000,
+			thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+			...(signal ? { abortSignal: signal } : {}),
 		},
-		{ signal }
-	);
+	});
+	const usage = addUsage(fastUsage, usageOf(deepResponse));
+	const answer = (deepResponse.text ?? '').trim();
+	if (!answer) throw new Error('ResearchAgent (deep lane) returned empty output');
 
-	const answer = (response.output_text ?? '').trim();
-	if (!answer) throw new Error('QuickSearch returned empty output');
-
-	const u = response.usage;
-	const usage: TokenUsage = {
-		inputTokens: u?.input_tokens ?? 0,
-		outputTokens: u?.output_tokens ?? 0,
-		totalTokens: u?.total_tokens ?? 0,
-		cachedTokens: u?.input_tokens_details?.cached_tokens,
+	const result: ResearchOutput = {
+		answer,
+		sources: extractSources(deepResponse),
+		tier: 'deep',
 	};
-	return { answer, usage };
+	logger.debug('ResearchAgent deep lane completed', {
+		model: process.env.GEMINI_RESEARCH_DEEP_MODEL,
+		sources: result.sources.length,
+	});
+	return { result, usage };
 }

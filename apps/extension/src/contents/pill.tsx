@@ -12,7 +12,7 @@ import { createEdgeGlow, type EdgeGlowHandle } from "./lib/edge-glow"
 import { derivePillView } from "./lib/pill-view"
 
 export const config: PlasmoCSConfig = {
-  matches: ["https://app.atlassportfolios.com/*"]
+  matches: ["<all_urls>"]
 }
 
 export const getStyle = () => {
@@ -25,7 +25,7 @@ const SLOW_TO_RECONNECTING_MS = 5_000
 const OFFLINE_FLASH_MS        = 5_000
 
 const Pill = () => {
-  const { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, toggle } = useSession()
+  const { active, wantSession, isAutomationRunning, researchTasks, isVisionOn, connectionStatus, isOffline, errorPending, panelOpen, pillEnabled, toggle } = useSession()
   const [showActive, setShowActive] = useState(false)
   const [degradedAged, setDegradedAged] = useState(false)
   const [offlineFlash, setOfflineFlash] = useState(false)
@@ -62,6 +62,8 @@ const Pill = () => {
     if (!isOffline && offlineFlash) setOfflineFlash(false)
   }, [isOffline, offlineFlash])
 
+  if (!pillEnabled) return null
+
   const view = derivePillView({
     active, wantSession, isOffline, offlineFlash, showActive, degradedAged, connectionStatus,
   })
@@ -76,9 +78,14 @@ const Pill = () => {
     toggle()
   }
 
+  // "Click me" error affordance: a stashed error the panel hasn't shown yet.
+  // Suppressed while the side panel is already open (nothing to nudge) or when
+  // offline. Clicking opens the panel to the stashed popup.
+  const showErrorBadge = errorPending && !panelOpen && view.pillState !== "offline"
+
   const classes = [
     "button relative flex items-center justify-center h-10 px-4 py-1 cursor-pointer bg-transparent rounded-full overflow-hidden origin-center transition-[width] duration-300 ease-in-out",
-    view.widthClass,
+    showErrorBadge ? "w-[220px]" : view.widthClass,
     view.tintClass,
   ].filter(Boolean).join(" ")
 
@@ -92,7 +99,17 @@ const Pill = () => {
         }}
         aria-label={wantSession ? "Stop session" : "Start session"}
       >
-        {view.showBarsLayout ? (
+        {showErrorBadge ? (
+          // Error takes precedence over the normal layout in both idle and
+          // active states — the compass glyph + a "click me" prompt.
+          <div className="flex items-center">
+            <div className="h-10 w-7 shrink-0" />
+            <CompassIcon className="size-10 absolute left-0 z-10" />
+            <span className="text_button relative z-10 whitespace-nowrap">
+              action needed, click me
+            </span>
+          </div>
+        ) : view.showBarsLayout ? (
           <div className="flex items-center gap-2 fade-in">
             {view.isReconnecting ? (
               <ReconnectingIcon className="size-6 spin-slow" />

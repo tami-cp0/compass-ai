@@ -10,7 +10,7 @@ import { Children, Component, isValidElement, useEffect, useLayoutEffect, useRef
 import ReactMarkdown, { remarkGfm } from "../vendor/react-markdown"
 
 export const config: PlasmoCSConfig = {
-  matches: ["https://app.atlassportfolios.com/*"]
+  matches: ["<all_urls>"]
 }
 
 export const getStyle = () => {

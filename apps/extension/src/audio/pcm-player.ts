@@ -47,6 +47,15 @@ export class PcmPlayer {
     return this.analyser
   }
 
+  // Create + resume the AudioContext NOW, while a user gesture is active. The
+  // context is otherwise created lazily on the first incoming chunk — which
+  // arrives after the async session handshake, with no gesture, so Chrome's
+  // autoplay policy leaves it suspended and playback is silent. Call this from
+  // the pill click that starts the session to unlock it.
+  prime(): void {
+    this.getCtx().resume()
+  }
+
   resume(): void {
     this.audioCtx?.resume()
   }

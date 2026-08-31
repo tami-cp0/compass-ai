@@ -29,8 +29,8 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000]
 
 const DEBUGGER_PROTOCOL_VERSION = "1.3"
 
-// CDP timing. Atlass navigates in-SPA (no document reload), so readyState is
-// often already "complete" and says nothing about whether the page's data has
+// CDP timing. The target app navigates in-SPA (no document reload), so readyState
+// is often already "complete" and says nothing about whether the page's data has
 // loaded — the holdings table renders empty, then fills after an XHR. So after
 // readyState we wait for DOM QUIESCENCE: poll a cheap content signature and
 // only proceed once it stops changing for DOM_IDLE_MS, capped at
@@ -47,6 +47,23 @@ const isMac =
   (navigator as any).userAgentData?.platform === "macOS" ||
   navigator.userAgent.includes("Mac")
 
+// Side panel: the toolbar icon opens it (gesture-safe), and first install opens
+// it straight to onboarding. Opening from a forwarded pill click is unreliable
+// (Chrome restricts the gesture chain across message passing), so we don't.
+chrome.sidePanel
+  ?.setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((err) => console.warn("[compass] setPanelBehavior failed", err))
+
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === "install") {
+    chrome.windows.getCurrent().then((win) => {
+      if (win.id !== undefined) {
+        chrome.sidePanel.open({ windowId: win.id }).catch(() => {})
+      }
+    })
+  }
+})
+
 // Outbound queue: messages sent while the WS is not yet open are buffered
 // and flushed in FIFO order when the WS opens.
 const outboundQueue: OutboundExtensionMessage[] = []
@@ -56,6 +73,86 @@ type ConnectionStatus = "ok" | "degraded" | "disconnected"
 
 let ws: WebSocket | null = null
 let sessionId: string | null = null
+// The user's keys + toggle + email from the last session_start, cached so the
+// SW can re-attach them when it fires session_resume itself on WS reconnect (the
+// content script isn't in the loop there). Cleared on session_end.
+let sessionKeys: { gemini: string; claude?: string } | null = null
+let sessionWebAutomation = false
+let sessionEmail = ""
+let sessionVoiceName = ""
+
+// storage.session survives SW eviction (in-memory, cleared on browser close,
+// never on disk). We mirror the session there and rehydrate on revival so a
+// reclaimed SW resumes instead of forcing the user to restart.
+const SESSION_STATE_KEY = "compass:sessionState"
+
+// The last session error, stashed for the side panel to pick up and render as a
+// popup. Written on session_error, read + cleared by the panel on mount / via a
+// storage.onChanged listener. storage.local (not session) so the panel sees it
+// even if it opens a beat later.
+const SESSION_ERROR_KEY = "compass:lastSessionError"
+
+interface PersistedSessionState {
+  sessionId: string
+  keys: { gemini: string; claude?: string }
+  webAutomation: boolean
+  email: string
+  voiceName: string
+}
+
+async function persistSessionState(): Promise<void> {
+  if (sessionId && sessionKeys) {
+    const state: PersistedSessionState = {
+      sessionId,
+      keys: sessionKeys,
+      webAutomation: sessionWebAutomation,
+      email: sessionEmail,
+      voiceName: sessionVoiceName,
+    }
+    await chrome.storage.session.set({ [SESSION_STATE_KEY]: state })
+  } else {
+    await chrome.storage.session.remove(SESSION_STATE_KEY)
+  }
+}
+
+let rehydrated = false
+async function rehydrateSessionState(): Promise<void> {
+  if (rehydrated || sessionId) {
+    rehydrated = true
+    return
+  }
+  const stored = await chrome.storage.session.get(SESSION_STATE_KEY)
+  const state = stored[SESSION_STATE_KEY] as PersistedSessionState | undefined
+  if (state) {
+    sessionId = state.sessionId
+    sessionKeys = state.keys
+    sessionWebAutomation = state.webAutomation
+    sessionEmail = state.email ?? ""
+    sessionVoiceName = state.voiceName ?? ""
+    console.log(`[compass] rehydrated session ${sessionId} from storage.session`)
+  }
+  rehydrated = true
+}
+
+// WS traffic resets the MV3 idle timer (Chrome 116+); this covers audio lulls.
+const KEEPALIVE_MS = 20_000
+let keepaliveTimer: ReturnType<typeof setInterval> | null = null
+
+function startKeepalive(): void {
+  if (keepaliveTimer !== null) return
+  keepaliveTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN && sessionId) {
+      ws.send(JSON.stringify({ type: "ping" } satisfies ExtensionMessage))
+    }
+  }, KEEPALIVE_MS)
+}
+
+function stopKeepalive(): void {
+  if (keepaliveTimer !== null) {
+    clearInterval(keepaliveTimer)
+    keepaliveTimer = null
+  }
+}
 // The tab that owns the active session, captured from sender.tab on
 // session_start. chrome.tabs.query({active}) is unreliable from a service
 // worker (focus may be on DevTools/another window), silently dropping relays.
@@ -94,6 +191,43 @@ function broadcastToAllTabs(msg: ServerMessage) {
       chrome.tabs.sendMessage(tab.id, msg).catch(() => {})
     }
   })
+}
+
+// A provider rejected the session (bad key / out of credits / missing key). Tear
+// the local session down so no resume is attempted, stash the error for the side
+// panel, and open the panel so the popup is seen even if it was closed.
+async function handleSessionError(
+  msg: Extract<ServerMessage, { type: "session_error" }>
+): Promise<void> {
+  // Forget the session — the server already refused/ended it; a resume would
+  // just fail again with the same key.
+  sessionId = null
+  sessionKeys = null
+  sessionWebAutomation = false
+  sessionEmail = ""
+  stopKeepalive()
+  stopVision()
+  void detachAgentDebugger()
+  await persistSessionState()
+
+  // Stash the error (with a nonce so an identical repeat still triggers the
+  // panel's storage.onChanged listener).
+  await chrome.storage.local.set({
+    [SESSION_ERROR_KEY]: {
+      reason: msg.reason,
+      kind: msg.kind ?? "other",
+      provider: msg.provider ?? null,
+      at: Date.now(),
+    },
+  })
+
+  // Open the side panel in the current window (best-effort — requires a window).
+  try {
+    const win = await chrome.windows.getCurrent()
+    if (win.id !== undefined) await chrome.sidePanel.open({ windowId: win.id })
+  } catch (err) {
+    console.warn("[compass] could not open side panel for session error", err)
+  }
 }
 
 function setConnectionStatus(next: ConnectionStatus) {
@@ -137,7 +271,26 @@ function stopBufferWatch() {
 
 function prepareForWire(message: OutboundExtensionMessage): ExtensionMessage | null {
   const msgType = (message as { type: string }).type
-  if (msgType === "session_start" || msgType === "session_end" || msgType === "session_resume") {
+  if (msgType === "session_start") {
+    const m = message as Extract<ExtensionMessage, { type: "session_start" }>
+    sessionKeys = m.keys
+    sessionWebAutomation = m.webAutomation
+    sessionEmail = m.email
+    sessionVoiceName = m.voiceName
+    void persistSessionState()
+    startKeepalive()
+    return message as ExtensionMessage
+  }
+  if (msgType === "session_end") {
+    sessionKeys = null
+    sessionWebAutomation = false
+    sessionEmail = ""
+    sessionVoiceName = ""
+    stopKeepalive()
+    void persistSessionState()
+    return message as ExtensionMessage
+  }
+  if (msgType === "session_resume") {
     return message as ExtensionMessage
   }
   if (!sessionId) {
@@ -155,7 +308,10 @@ function flushQueue() {
     const wire = prepareForWire(msg)
     if (wire === null) continue
     ws!.send(JSON.stringify(wire))
-    if ((wire as { type: string }).type === "session_end") sessionId = null
+    if ((wire as { type: string }).type === "session_end") {
+      sessionId = null
+      void persistSessionState()
+    }
   }
 }
 
@@ -167,16 +323,32 @@ function connect() {
 
   ws = new WebSocket(WS_URL)
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     attempt = 0
     setConnectionStatus("ok")
     startBufferWatch()
 
+    await rehydrateSessionState()
+
     flushQueue()
 
-    if (sessionId) {
+    if (sessionId && sessionKeys) {
       console.log(`[compass] WS reconnected — resuming session ${sessionId}`)
-      ws!.send(JSON.stringify({ type: "session_resume", sessionId } satisfies ExtensionMessage))
+      startKeepalive()
+      ws!.send(
+        JSON.stringify({
+          type:          "session_resume",
+          sessionId,
+          keys:          sessionKeys,
+          webAutomation: sessionWebAutomation,
+          email:         sessionEmail,
+          voiceName:     sessionVoiceName,
+        } satisfies ExtensionMessage)
+      )
+    } else if (sessionId) {
+      console.warn("[compass] WS reconnected but keys are gone — cannot resume; clearing session")
+      sessionId = null
+      void persistSessionState()
     } else {
       console.log("[compass] WS connected — waiting for mic to start session")
     }
@@ -193,6 +365,7 @@ function connect() {
 
     if (msg.type === "session_init") {
       sessionId = msg.sessionId
+      void persistSessionState()
       console.log(`[compass] session started, sessionId: ${sessionId}`)
       return
     }
@@ -234,6 +407,16 @@ function connect() {
       return
     }
 
+    if (msg.type === "session_error") {
+      // The session is dead server-side. The SW forgets the session so no
+      // resume is attempted, stashes the error for the side panel to render as
+      // a popup, opens the panel, and relays to the pill so it drops to its
+      // non-active state immediately.
+      void handleSessionError(msg)
+      relayToSessionTab(msg)
+      return
+    }
+
     relayToSessionTab(msg)
   }
 
@@ -253,6 +436,10 @@ function scheduleReconnect() {
     console.warn("[compass] reconnect attempts exhausted — tearing down session")
     sessionId = null
     sessionTabId = null
+    sessionKeys = null
+    sessionWebAutomation = false
+    stopKeepalive()
+    void persistSessionState()
     stopVision()
     void detachAgentDebugger()
     broadcastToAllTabs({ type: "pin_pane_clear", sessionId: "" })
@@ -271,7 +458,10 @@ function sendRaw(message: OutboundExtensionMessage) {
     const wire = prepareForWire(message)
     if (wire === null) return
     ws.send(JSON.stringify(wire))
-    if ((wire as { type: string }).type === "session_end") sessionId = null
+    if ((wire as { type: string }).type === "session_end") {
+      sessionId = null
+      void persistSessionState()
+    }
     return
   }
 
@@ -525,18 +715,6 @@ async function handlePageDataRequest(
     })
 
     const data = (results[0]?.result as string | undefined) ?? ""
-    // DIAGNOSTIC (read_page_data debug): shows the coordinate space so we can
-    // see where the box actually lands vs. the live viewport. dpr + viewport
-    // reveal whether the box was in normalized/physical/CSS space.
-    const [dbgDpr, dbgVw, dbgVh] = await readViewport(sessionTabId)
-    console.log("[compass][page-data-debug]", {
-      incomingBox: box,
-      physicalPixels,
-      dpr: dbgDpr,
-      viewportCss: { vw: dbgVw, vh: dbgVh },
-      cssBoxAfterScale: cssBox,
-      chars: data.length,
-    })
     sendRaw({ type: "page_data_response", requestId, data, truncated: false })
   } catch (err) {
     console.error("[compass] page data extraction failed:", err)
@@ -1076,6 +1254,22 @@ chrome.runtime.onConnect.addListener((port) => {
 })
 
 chrome.runtime.onMessage.addListener((message: OutboundExtensionMessage, sender, _sendResponse) => {
+  // Local control message (not a WS message): the pill (content script) can't
+  // call chrome.sidePanel itself, so it asks us to open the panel. Open
+  // synchronously off sender.tab (no awaits) to preserve the click's user
+  // gesture, which Chrome requires. windowId is preferred; tabId as a fallback.
+  if ((message as { type: string }).type === "open_side_panel") {
+    const winId = sender.tab?.windowId
+    const tabId = sender.tab?.id
+    const opened =
+      winId !== undefined
+        ? chrome.sidePanel.open({ windowId: winId })
+        : tabId !== undefined
+          ? chrome.sidePanel.open({ tabId })
+          : Promise.reject(new Error("no sender window/tab"))
+    opened.catch((err) => console.warn("[compass] open_side_panel failed", err))
+    return false
+  }
   if (message.type === "session_end") {
     sessionTabId = null
     stopVision()

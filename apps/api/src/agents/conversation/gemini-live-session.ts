@@ -1,15 +1,16 @@
-import type { LiveServerMessage, Session } from '@google/genai';
+import type { GoogleGenAI, LiveServerMessage, Session } from '@google/genai';
 import type { ServerMessage } from '@compass-ai/types';
 import { sessionLogger, type Logger } from '../../infra/logger.js';
 import {
 	appendTurn,
 	setResumptionHandle,
 	type ConversationHistory,
-} from '../../infra/redis.js';
+} from '../../infra/session-history.js';
 import type { TokenTracker } from '../../infra/token-tracker.js';
-import { ai, LIVE_CONFIG, SYSTEM_PROMPT, HELP_TOPICS } from './live-config.js';
+import { LIVE_CONFIG, SYSTEM_PROMPT, HELP_TOPICS, IDLE_NUDGE } from './live-config.js';
 import { nowReadableWAT } from '../../infra/datetime.js';
 import { lookupSector, lookupTicker } from '../../data/ngx-equities.js';
+import { classifyProviderError } from '../../infra/provider-errors.js';
 
 // Backoff delays (ms) for reconnectWithHandle. Capped at 8 s after 3 doublings.
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000];
@@ -18,6 +19,10 @@ export class GeminiLiveSession {
 	private sessionId: string;
 	private send: (msg: ServerMessage) => void;
 	private history: ConversationHistory;
+	// Per-session Gemini client, built from the user's key and injected here.
+	private ai: GoogleGenAI;
+	// User-selected prebuilt voice name, or null to use LIVE_CONFIG's default.
+	private voiceName: string | null = null;
 	private session: Session | null = null;
 	private outputTranscriptBuffer = '';
 	private log: Logger;
@@ -50,6 +55,17 @@ export class GeminiLiveSession {
 	// model response mid-utterance would talk over them.
 	private static readonly USER_SPEECH_HOLD_MS = 1500;
 
+	// Proactivity nudge. When the conversation goes fully idle (model done
+	// speaking, no task running, user quiet) for this long, inject a thin
+	// permission-to-speak context so the agent can follow up or let it rest.
+	// Fires at most once per quiet period (armed on turn end, disarmed by any
+	// user speech / model audio / tool call). Deliberately no topic or opener —
+	// that would bias what it says; the persona already knows to be proactive.
+	private static readonly IDLE_NUDGE_MS = 8000;
+	private idleTimer: ReturnType<typeof setTimeout> | null = null;
+	// One nudge per quiet stretch — reset when the user speaks again.
+	private nudgedThisQuietPeriod = false;
+
 	// If the speaking gate is up but no audio arrived for this long, the
 	// turn-end event was lost (reconnect swap, dropped frame) — force it open.
 	private static readonly SPEAKING_GATE_STALE_MS = 10_000;
@@ -66,9 +82,6 @@ export class GeminiLiveSession {
 	// Tool call handlers — wired by TaskManager.
 	onDispatchResearch:
 		| ((name: string, description: string) => Record<string, unknown>)
-		| null = null;
-	onQuickSearch:
-		| ((query: string) => Promise<Record<string, unknown>>)
 		| null = null;
 	onDispatchAutomation:
 		| ((name: string, description: string) => Record<string, unknown>)
@@ -104,11 +117,16 @@ export class GeminiLiveSession {
 	constructor(
 		sessionId: string,
 		send: (msg: ServerMessage) => void,
-		history: ConversationHistory
+		history: ConversationHistory,
+		ai: GoogleGenAI,
+		voiceName?: string
 	) {
 		this.sessionId = sessionId;
 		this.send = send;
 		this.history = history;
+		this.ai = ai;
+		// User-selected prebuilt voice; falls back to LIVE_CONFIG's default.
+		this.voiceName = voiceName?.trim() || null;
 		this.log = sessionLogger(sessionId);
 	}
 
@@ -128,11 +146,15 @@ export class GeminiLiveSession {
 		// cacheable prefix. Only this trailing line is volatile per session.
 		const wakeContext = `\n\n<Session_Clock>\nYou came online on ${nowReadableWAT()}. Treat this as your default reference for "now" — market hours, holiday checks, freshness of cached information. It is a snapshot; if precision matters or the session has been running for a while, call request_current_time for an exact refresh. Timestamp lines on async injections ("Completed at: …", "Failed at: …") are also authoritative "now" signals.\n</Session_Clock>`;
 
-		this.session = await ai.live.connect({
+		this.session = await this.ai.live.connect({
 			model: process.env.GEMINI_LIVE_MODEL!,
 			config: {
 				systemInstruction: { parts: [{ text: SYSTEM_PROMPT + historyContext + wakeContext }] },
 				...LIVE_CONFIG,
+				// Override the default voice with the user's choice, if any.
+				...(this.voiceName
+					? { speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: this.voiceName } } } }
+					: {}),
 				sessionResumption: resumeHandle ? { handle: resumeHandle } : {},
 			},
 			callbacks: {
@@ -375,7 +397,51 @@ export class GeminiLiveSession {
 		}
 	}
 
+	// ── Proactivity nudge ───────────────────────────────────────────────────
+	// Arm the idle timer. Called when the model's turn ends. If nothing happens
+	// for IDLE_NUDGE_MS, the conversation is genuinely idle and we nudge once.
+	// Skipped if we've already nudged this quiet period, or if a task is running
+	// (a pending result will drive the next turn — no dead air to fill).
+	private armIdleTimer(): void {
+		this.cancelIdleTimer();
+		if (this.nudgedThisQuietPeriod) return;
+		if ((this.getPendingTaskNames?.() ?? []).length > 0) return;
+		this.idleTimer = setTimeout(() => {
+			this.idleTimer = null;
+			this.fireIdleNudge();
+		}, GeminiLiveSession.IDLE_NUDGE_MS);
+	}
+
+	// Cancel a pending nudge. Called on any sign of life — user speech, model
+	// audio, a tool call — so the nudge only fires from true dead air.
+	private cancelIdleTimer(): void {
+		if (this.idleTimer !== null) {
+			clearTimeout(this.idleTimer);
+			this.idleTimer = null;
+		}
+	}
+
+	private fireIdleNudge(): void {
+		// Re-check under the timer: if anything started since we armed, abort.
+		if (
+			this.isModelSpeaking ||
+			this.processingToolCall ||
+			this.nudgedThisQuietPeriod ||
+			(this.getPendingTaskNames?.() ?? []).length > 0
+		) {
+			return;
+		}
+		this.nudgedThisQuietPeriod = true;
+		this.log.debug('Idle nudge fired', {
+			sinceUserSpeechMs: Date.now() - this.lastUserSpeechAt,
+		});
+		// kind:'result' → turnComplete:true, so it prompts a spoken turn, and it
+		// still respects the inject gate (held if the model somehow speaks first).
+		this.injectContent(IDLE_NUDGE, { kind: 'result' });
+	}
+
 	async close(): Promise<void> {
+		this.cancelIdleTimer();
 		if (this.userSpeechRetryTimer !== null) {
 			clearTimeout(this.userSpeechRetryTimer);
 			this.userSpeechRetryTimer = null;
@@ -415,6 +481,24 @@ export class GeminiLiveSession {
 			this.log.error('Gemini Live reconnect exhausted', {
 				error: lastErr instanceof Error ? lastErr : new Error(String(lastErr)),
 			});
+			// The live session is dead — we couldn't reconnect. Surface a popup so
+			// it doesn't die silently: the specific key/credits popup when that's
+			// the cause, otherwise a generic "session ended" one.
+			const classified = classifyProviderError('gemini', lastErr);
+			if (classified.kind === 'credits' || classified.kind === 'invalid_key') {
+				this.send({
+					type: 'session_error',
+					reason: classified.reason,
+					kind: classified.kind,
+					provider: 'gemini',
+				});
+			} else {
+				this.send({
+					type: 'session_error',
+					reason: 'The live session was lost and could not reconnect.',
+					kind: 'other',
+				});
+			}
 			oldSession?.close();
 		} finally {
 			this.reconnecting = false;
@@ -427,7 +511,7 @@ export class GeminiLiveSession {
 			this.currentHandle = resumption.newHandle;
 			setResumptionHandle(this.sessionId, resumption.newHandle).catch(
 				(err: unknown) =>
-					this.log.error('Redis setResumptionHandle failed', {
+					this.log.error('setResumptionHandle failed', {
 						error: err instanceof Error ? err : new Error(String(err)),
 					})
 			);
@@ -468,6 +552,9 @@ export class GeminiLiveSession {
 			// injects wait for turnComplete / interrupted.
 			this.isModelSpeaking = true;
 			this.lastAudioChunkAt = Date.now();
+			// The model is talking — not idle. Any armed nudge is void; it re-arms
+			// when this turn completes.
+			this.cancelIdleTimer();
 			this.send({
 				type: 'audio_chunk',
 				sessionId: this.sessionId,
@@ -476,12 +563,16 @@ export class GeminiLiveSession {
 			});
 		}
 
-		// Transcript — write user speech to Redis. Also feeds the inject
-		// gate: a fresh transcript fragment means the user is (or was just)
+		// Transcript — record user speech in session history. Also feeds the
+		// inject gate: a fresh transcript fragment means the user is (or was just)
 		// talking, so result flushes hold off briefly.
 		const inputTranscript = msg.serverContent?.inputTranscription;
 		if (inputTranscript?.text) {
 			this.lastUserSpeechAt = Date.now();
+			// The user spoke — this quiet period is over. Cancel any pending nudge
+			// and re-arm the once-per-quiet-period guard for the next lull.
+			this.cancelIdleTimer();
+			this.nudgedThisQuietPeriod = false;
 			this.flushHeartbeatsForUserTurn();
 			// Once per user turn, if anything is still running, surface it as bare
 			// fact (no instruction) so the model reasons about what it's still
@@ -497,7 +588,7 @@ export class GeminiLiveSession {
 				role: 'user',
 				content: inputTranscript.text,
 			}).catch((err: unknown) =>
-				this.log.error('Redis appendTurn failed', {
+				this.log.error('appendTurn failed', {
 					turn: 'user',
 					error: err instanceof Error ? err : new Error(String(err)),
 				})
@@ -510,13 +601,13 @@ export class GeminiLiveSession {
 			this.outputTranscriptBuffer += outputTranscript.text;
 		}
 
-		// Flush buffered transcript to Redis on turn complete
+		// Flush buffered transcript to session history on turn complete
 		if (msg.serverContent?.turnComplete && this.outputTranscriptBuffer) {
 			const text = this.outputTranscriptBuffer;
 			this.outputTranscriptBuffer = '';
 			appendTurn(this.sessionId, { role: 'model', content: text }).catch(
 				(err: unknown) =>
-					this.log.error('Redis appendTurn failed', {
+					this.log.error('appendTurn failed', {
 						turn: 'model',
 						error: err instanceof Error ? err : new Error(String(err)),
 					})
@@ -530,6 +621,9 @@ export class GeminiLiveSession {
 			this.isModelSpeaking = false;
 			this.pendingNoticedThisTurn = false; // arm the pending reminder for the next user turn
 			this.flushInjectQueue();
+			// Turn's over. If the queue didn't just start another turn and nothing
+			// else is in flight, start the idle countdown toward a proactivity nudge.
+			this.armIdleTimer();
 		}
 
 		// Tool calls — handle synchronously, respond immediately
@@ -540,6 +634,8 @@ export class GeminiLiveSession {
 		// have been sent, so a background task that completes mid-handler can't
 		// interleave clientContent with the required functionResponses/realtimeInput.
 		this.processingToolCall = true;
+		// A tool call means the agent is actively working — cancel any idle nudge.
+		this.cancelIdleTimer();
 
 		const responses: Array<{
 			id: string;
@@ -626,8 +722,6 @@ export class GeminiLiveSession {
 						args.name as string,
 						args.description as string
 					);
-				} else if (call.name === 'quick_search' && this.onQuickSearch) {
-					result = await this.onQuickSearch(args.query as string);
 				} else if (
 					call.name === 'dispatch_automation' &&
 					this.onDispatchAutomation
