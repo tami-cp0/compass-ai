@@ -24,6 +24,7 @@ Built with **[Plasmo](https://www.plasmo.com/)** (MV3) + React 18 + Tailwind. Ty
 ```
 src/
 ├── background.ts             # MV3 service worker: WS client + message router
+├── sidepanel.tsx             # Side panel: onboarding, API-key entry, settings, error popups
 ├── declarations.d.ts         # Module declarations (CSS, assets)
 ├── audio/
 │   ├── pcm-capture.ts        # MediaStream → AudioWorklet wiring

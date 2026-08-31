@@ -27,7 +27,7 @@ src/
 │   ├── index.ts            # Entrypoint: load env, start server, graceful shutdown
 │   ├── server.ts           # uWebSockets.js app, WS upgrade + origin allowlist, pin-pane handlers
 │   ├── session-store.ts    # In-memory WS session registry
-│   ├── task-manager.ts     # Concurrency limits (research x1, automation x1) + task routing
+│   ├── task-manager.ts     # Concurrency limits (research x2, automation x1) + task routing
 │   └── pane-estimate.ts    # Pin-pane sizing/fence helpers
 ├── agents/
 │   ├── conversation/       # Gemini Live session + live-config (tools, system prompt)
@@ -41,6 +41,8 @@ src/
     ├── env.ts              # loads .env (side-effect import, first in entrypoint)
     ├── session-history.ts  # in-memory conversation history + Gemini resumption handles
     ├── token-tracker.ts    # Per-session token accounting
+    ├── provider-errors.ts  # Maps Claude/Gemini API errors to structured session errors
+    ├── email-store.ts      # Optional Neon Postgres store for user emails
     └── datetime.ts         # Date/time helpers
 ```
 
